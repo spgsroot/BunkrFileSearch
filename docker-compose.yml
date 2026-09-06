@@ -1,0 +1,45 @@
+services:
+  db-init:
+    build: .
+    command: ["uv", "run", "--no-sync", "bunkr-index", "init"]
+    environment:
+      BUNKR_DB: /app/data/bunkr.db
+    volumes:
+      - ./data:/app/data
+    restart: "no"
+
+  sync:
+    build: .
+    command:
+      ["uv", "run", "--no-sync", "bunkr-index", "sync",
+       "--workers", "${SYNC_WORKERS:-6}",
+       "--min-interval", "${SYNC_MIN_INTERVAL:-0.15}"]
+    environment:
+      BUNKR_DB: /app/data/bunkr.db
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  web:
+    build: .
+    command:
+      ["uv", "run", "--no-sync", "bunkr-index", "serve",
+       "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      BUNKR_DB: /app/data/bunkr.db
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+    ports:
+      - "${PORT:-8000}:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/stats', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
