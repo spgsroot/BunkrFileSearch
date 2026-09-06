@@ -1,4 +1,4 @@
-# Bunkr File Search
+# [Bunkr File Search Site](https://bunkr-files-search.rustnomicon.cc)
 
 A self-hosted search service for **filenames inside Bunkr albums**. It indexes
 metadata only; media files are never downloaded.
