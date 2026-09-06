@@ -13,6 +13,7 @@ import logging
 import os
 import random
 import time
+from pathlib import Path
 
 import httpx
 
@@ -46,21 +47,50 @@ def _pid_alive(pid: int) -> bool:
         return False
 
 
+def _process_start_ticks(pid: int) -> str | None:
+    """Return the Linux /proc start time, which distinguishes reused PIDs."""
+    if os.name == "nt":
+        return None
+    try:
+        # After the final ')' are fields 3 onward; starttime is field 22.
+        return (Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1]
+                .split()[19])
+    except (OSError, IndexError):
+        return None
+
+
+def _lock_identity() -> str:
+    """Identify this process without confusing a recreated Docker PID 1."""
+    pid = os.getpid()
+    start = _process_start_ticks(pid)
+    return f"{pid}:{start}" if start is not None else str(pid)
+
+
+def _lock_owner_is_alive(value: str) -> bool:
+    """Return whether a lock owner still refers to the same process."""
+    pid_text, separator, recorded_start = value.strip().partition(":")
+    try:
+        pid = int(pid_text)
+    except ValueError:
+        return False
+    if not _pid_alive(pid):
+        return False
+    if not separator:
+        # Legacy PID-only locks cannot distinguish a newly recreated Linux
+        # container's PID 1 from its predecessor.
+        return os.name == "nt" or pid != os.getpid()
+    return _process_start_ticks(pid) == recorded_start
+
+
 def acquire_crawl_lock() -> bool:
-    """Exclusive crawl lock for standalone ``sync`` and manual ``crawl``.
-    Returns False when another crawler holds it. Stale locks left by dead
-    processes are reclaimed."""
+    """Acquire the exclusive, stale-safe lock for crawling."""
     config.DATA_DIR.mkdir(parents=True, exist_ok=True)
     try:
         if LOCK_FILE.exists():
-            try:
-                pid = int(LOCK_FILE.read_text().strip())
-            except ValueError:
-                pid = None
-            if pid and _pid_alive(pid):
+            if _lock_owner_is_alive(LOCK_FILE.read_text()):
                 return False
             LOCK_FILE.unlink(missing_ok=True)
-        LOCK_FILE.write_text(str(os.getpid()))
+        LOCK_FILE.write_text(_lock_identity())
         return True
     except OSError:
         return False
@@ -68,7 +98,7 @@ def acquire_crawl_lock() -> bool:
 
 def release_crawl_lock() -> None:
     try:
-        if LOCK_FILE.exists() and LOCK_FILE.read_text().strip() == str(os.getpid()):
+        if LOCK_FILE.exists() and LOCK_FILE.read_text().strip() == _lock_identity():
             LOCK_FILE.unlink()
     except OSError:
         pass
