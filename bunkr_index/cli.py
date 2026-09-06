@@ -183,7 +183,7 @@ def main(argv=None) -> int:
     p.add_argument("--discover-delay", type=float, default=0.08,
                    help="min seconds between discovery page dispatches")
     p.add_argument("--interval-hours", type=float, default=24.0,
-                   help="hours between completed sync cycles")
+                   help="hours between sync cycle starts")
     p.add_argument("--once", action="store_true",
                    help="run one discover+crawl cycle and exit")
     p.add_argument("--full-discover", action="store_true",

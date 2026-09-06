@@ -1,8 +1,8 @@
 """Standalone discovery and metadata synchronization process.
 
 Run this separately from ``serve``. It owns the crawler lock for the entire
-``discover -> crawl`` cycle, writes the shared SQLite database, then repeats
-after the configured interval. The UI only reads that database (plus its
+``discover -> crawl`` cycle, writes the shared SQLite database, and schedules
+the next cycle from this cycle's start time.
 explicit add/delete API operations) and never starts network scraping.
 """
 
@@ -66,9 +66,10 @@ def run(
     once: bool = False,
     full_discover: bool = False,
 ) -> None:
-    """Run sync once or continuously until interrupted."""
+    """Run sync once or continuously at the configured start-to-start interval."""
     interval_seconds = max(interval_hours, 0.0) * 3600
     while True:
+        cycle_started = time.monotonic()
         try:
             summary = run_cycle(
                 db_path=db_path,
@@ -86,5 +87,6 @@ def run(
                 raise
         if once:
             return
-        log.info("sync: next cycle in %.1fh", interval_seconds / 3600)
-        time.sleep(interval_seconds)
+        sleep_seconds = max(interval_seconds - (time.monotonic() - cycle_started), 0)
+        log.info("sync: next cycle in %.1fh", sleep_seconds / 3600)
+        time.sleep(sleep_seconds)
