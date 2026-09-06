@@ -171,6 +171,7 @@ Environment variables:
 - `PORT`: external web port.
 - `SYNC_WORKERS`: crawler concurrency.
 - `SYNC_MIN_INTERVAL`: minimum seconds between request starts.
+- `SYNC_INTERVAL_HOURS`: hours to wait after a completed sync cycle; defaults to `24`.
 
 ## Scale and request politeness
 

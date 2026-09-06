@@ -11,9 +11,10 @@ services:
   sync:
     build: .
     command:
-      ["uv", "run", "--no-sync", "bunkr-index", "sync",
+      ["python", "-m", "bunkr_index", "sync",
        "--workers", "${SYNC_WORKERS:-6}",
-       "--min-interval", "${SYNC_MIN_INTERVAL:-0.15}"]
+       "--min-interval", "${SYNC_MIN_INTERVAL:-0.15}",
+       "--interval-hours", "${SYNC_INTERVAL_HOURS:-24}"]
     environment:
       BUNKR_DB: /app/data/bunkr.db
     volumes:
