@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import json
 import re
 import time
 from pathlib import Path
-from typing import Annotated, Any
-from litestar import Litestar, delete, get, post
+from typing import Annotated, Any, Callable
+from litestar import Litestar, Request, delete, get, post
 from litestar.exceptions import HTTPException
 from litestar.openapi.config import OpenAPIConfig
+from litestar.response import Response
 from litestar.static_files import create_static_files_router
+from litestar.params import QueryParameter
+from . import cache as cache_module
 from . import config, db, search
 
 _FRONTEND = Path(config.FRONTEND_DIR)
@@ -29,12 +35,87 @@ def _con():
     return db.connect()
 
 
-@get("/api/search", sync_to_thread=True)
-def api_search(
+# Search responses are cached in-process for a short window: repeated or
+# revalidated requests skip SQLite entirely, while the TTL keeps newly crawled
+# metadata visible within about a minute.
+_SEARCH_CACHE = cache_module.TTLCache(maxsize=1024, ttl=60.0)
+
+
+def _cache_key(*parts: object) -> str:
+    """Canonical cache key from a request's distinguishing parameters."""
+    return "\x1f".join("" if part is None else str(part) for part in parts)
+
+
+def _json_body(payload: dict) -> bytes:
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
+
+
+def _etag(body: bytes) -> str:
+    return '"' + hashlib.sha1(body).hexdigest() + '"'
+
+
+def _etag_matches(header: str, etag: str) -> bool:
+    """True if a (weak, possibly comma-separated) If-None-Match header matches."""
+    expected = etag.strip()
+    if expected.startswith("W/"):
+        expected = expected[2:].strip()
+    for token in header.split(","):
+        token = token.strip()
+        if token.startswith("W/"):
+            token = token[2:].strip()
+        if token == expected:
+            return True
+    return False
+
+
+async def _respond(
+    request: Request,
+    key: str,
+    build: Callable[[], dict],
+    *,
+    took_ms: int | None = None,
+) -> Response:
+    """Serve ``build()``'s payload through the TTL cache with ETag support.
+
+    ``build`` runs off the event loop via ``asyncio.to_thread``. It must return
+    JSON-serializable data without timing fields; when ``took_ms`` is supplied
+    it is appended only to fresh 200 responses so the cached body and ETag stay
+    stable across requests.
+    """
+    cached = _SEARCH_CACHE.get(key)
+    if cached is not None:
+        body: bytes = cached
+        hit = True
+    else:
+        body = _json_body(await asyncio.to_thread(build))
+        _SEARCH_CACHE.set(key, body)
+        hit = False
+    etag = _etag(body)
+    headers = {
+        "ETag": etag,
+        "Cache-Control": "no-cache",
+        "X-Cache": "hit" if hit else "miss",
+    }
+    if _etag_matches(request.headers.get("if-none-match") or "", etag):
+        return Response(content=b"", status_code=304, headers=headers)
+    if took_ms is not None:
+        payload = json.loads(body)
+        payload["took_ms"] = took_ms
+        body = _json_body(payload)
+    return Response(content=body, media_type="application/json", headers=headers)
+
+
+@get("/api/search")
+async def api_search(
+    request: Request,
     q: Annotated[str, QueryParameter(default="", max_length=200)],
     media: Annotated[
         str | None,
         QueryParameter(default=None, pattern=r"^(|image|video|audio|other)$"),
+    ],
+    ext: Annotated[
+        str | None,
+        QueryParameter(default=None, pattern=r"^[A-Za-z0-9]{1,16}$"),
     ],
     sort: Annotated[
         str,
@@ -42,61 +123,86 @@ def api_search(
     ],
     page: Annotated[int, QueryParameter(default=1, ge=1)],
     per: Annotated[int, QueryParameter(default=20, ge=1, le=100)],
-) -> dict[str, Any]:
+    cursor: Annotated[str | None, QueryParameter(default=None, max_length=1024)],
+) -> Response:
     t0 = time.perf_counter()
-    con = _con()
-    try:
-        out = search.search_files(
-            con, q=q, media=(media or None), sort=sort,
-            limit=per, offset=(page - 1) * per,
-        )
-    finally:
-        con.close()
-    out.update(page=page, per=per, took_ms=round((time.perf_counter() - t0) * 1000))
-    return out
+    key = _cache_key(
+        "/api/search", q, media or "", ext or "", sort, page, per, cursor or ""
+    )
+
+    def build() -> dict:
+        con = _con()
+        try:
+            try:
+                out = search.search_files(
+                    con, q=q, media=(media or None), extension=(ext or None),
+                    sort=sort, limit=per, offset=(page - 1) * per, cursor=cursor,
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        finally:
+            con.close()
+        out.update(page=page, per=per)
+        return out
+
+    return await _respond(
+        request, key, build, took_ms=round((time.perf_counter() - t0) * 1000)
+    )
 
 
-@get("/api/albums", sync_to_thread=True)
-def api_albums(
+@get("/api/albums")
+async def api_albums(
+    request: Request,
     q: Annotated[str, QueryParameter(default="", max_length=200)],
     page: Annotated[int, QueryParameter(default=1, ge=1)],
     per: Annotated[int, QueryParameter(default=20, ge=1, le=100)],
     indexed: Annotated[bool | None, QueryParameter(default=None)],
-) -> dict[str, Any]:
-    con = _con()
-    try:
-        if q:
-            out = search.search_albums(con, q=q, limit=per, offset=(page - 1) * per)
-        else:
-            params: list[Any] = []
-            where = ""
-            if indexed is not None:
-                where = "WHERE a.indexed_at IS NOT NULL" if indexed else "WHERE a.indexed_at IS NULL"
-            total = con.execute(
-                "SELECT COUNT(*) FROM albums a " + where, params
-            ).fetchone()[0]
-            rows = con.execute(
-                """
-                SELECT a.bunkr_id, a.title, a.file_count, a.thumb,
-                       a.indexed_at IS NOT NULL AS indexed,
-                       (SELECT COUNT(*) FROM files f WHERE f.album_id = a.bunkr_id)
-                           AS real_files
-                FROM albums a
-                """ + where + """
-                ORDER BY COALESCE(a.updated_at, a.discovered_at) DESC
-                LIMIT ? OFFSET ?
-                """,
-                params + [per, (page - 1) * per],
-            ).fetchall()
-            out = {
-                "query": "",
-                "total": total,
-                "results": [dict(r) for r in rows],
-            }
+) -> Response:
+    key = _cache_key("/api/albums", q, page, per, "" if indexed is None else indexed)
+
+    def build() -> dict:
+        con = _con()
+        try:
+            if q:
+                out = search.search_albums(
+                    con, q=q, limit=per, offset=(page - 1) * per
+                )
+            else:
+                params: list[Any] = []
+                where = ""
+                if indexed is not None:
+                    where = (
+                        "WHERE a.indexed_at IS NOT NULL"
+                        if indexed
+                        else "WHERE a.indexed_at IS NULL"
+                    )
+                total = con.execute(
+                    "SELECT COUNT(*) FROM albums a " + where, params
+                ).fetchone()[0]
+                rows = con.execute(
+                    """
+                    SELECT a.bunkr_id, a.title, a.file_count, a.thumb,
+                           a.indexed_at IS NOT NULL AS indexed,
+                           (SELECT COUNT(*) FROM files f WHERE f.album_id = a.bunkr_id)
+                               AS real_files
+                    FROM albums a
+                    """ + where + """
+                    ORDER BY COALESCE(a.updated_at, a.discovered_at) DESC
+                    LIMIT ? OFFSET ?
+                    """,
+                    params + [per, (page - 1) * per],
+                ).fetchall()
+                out = {
+                    "query": "",
+                    "total": total,
+                    "results": [dict(r) for r in rows],
+                }
+        finally:
+            con.close()
         out.update(page=page, per=per)
         return out
-    finally:
-        con.close()
+
+    return await _respond(request, key, build)
 
 
 @post("/api/albums", sync_to_thread=True, status_code=200)

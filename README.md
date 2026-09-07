@@ -56,20 +56,21 @@ breaking the database.
 
 ## Search behavior
 
-- **Queries of three or more characters** use FTS5 trigram substring search:
-  `ali_smi`, `alicesmith`, and `name_001` work as expected. Spaces are treated
-  as interchangeable with `_`, `-`, or no separator, so `cropcenter 1080` also
-  finds `cropcenter_1080_1080.jpg`. Default ordering is BM25 relevance.
-- **One- or two-character queries** use an indexed prefix match. For example,
-  `sn` finds `SNOW_…`, but not `…_sn_…`. Trigram indexes cannot efficiently
-  search substrings shorter than three characters, and a full scan of millions
-  of records is deliberately avoided.
-- **An empty query** lists the newest files.
-- Media filtering accepts `image`, `video`, `audio`, or `other`; sort orders are
-  `relevance`, `newest`, `oldest`, and `size`.
+- **Queries of three or more characters** use FTS5 trigram substring search
+  across the original filename, storage filename, and slug. Unquoted words are
+  combined with AND, so `diora audition` finds names with text between the
+  words; use `"diora baird"` for an exact contiguous phrase. Spaces, `_`, `-`,
+  `.`, and `+` are equivalent term separators, including mixed combinations.
+- **One- or two-character queries** use a case-insensitive indexed prefix
+  match. For example, `sn` finds `SNOW_…`, but not `…_sn_…`. Trigram indexes
+  cannot efficiently search substrings shorter than three characters.
+- **An empty query** lists the newest files. `newest`, `oldest`, and `size`
+  sorting work in every search mode; prefix-mode `relevance` is alphabetical.
+- Media filtering accepts `image`, `video`, `audio`, or `other`; `ext` filters
+  an exact filename extension such as `jpg` or `mp4`.
 - Match counting is capped at 50,000. Above the cap the API returns
-  `total: 50000` with `truncated: true`, displayed as `50,000+` in the UI. This
-  prevents expensive full counts for broad searches.
+  `total: 50000` with `truncated: true`; `has_more` and `next_cursor` still
+  allow pagination beyond that display limit.
 
 The UI also shows an **Album matches** section for albums whose titles match the
 current query.
@@ -78,12 +79,20 @@ current query.
 
 | Method | URL | Description |
 |---|---|---|
-| GET | `/api/search?q=&media=&sort=&page=&per=` | Search files; returns `{total, truncated, results[], …}`. |
+| GET | `/api/search?q=&media=&ext=&sort=&page=&per=&cursor=` | Search files; returns `{total, truncated, has_more, next_cursor, results[], …}`. `ext` is a case-insensitive exact extension filter. `cursor` is an opaque token from the prior response and takes precedence over `page`. |
 | GET | `/api/albums?q=&page=&per=&indexed=` | List or search albums. |
 | GET | `/api/stats` | Return index counters. |
 | POST | `/api/albums` with `{"urls": [...]}` | Enqueue albums for crawling. |
 | DELETE | `/api/albums/{bunkr_id}` | Delete an album and its files. |
 | GET | `/` | Serve the web UI. |
+
+Search responses carry `Cache-Control: no-cache` and a content `ETag`; clients
+that send the ETag back in `If-None-Match` receive an empty `304 Not Modified`
+while the result is unchanged. Identical requests are also served from a
+bounded in-process TTL cache (1,024 entries, 60 seconds, LRU), so repeat
+queries and revalidations skip SQLite entirely; the `X-Cache: hit|miss`
+response header reports which path served the request. The TTL bounds
+staleness after new metadata is crawled.
 
 ## Database schema
 
@@ -93,13 +102,17 @@ current query.
 albums(bunkr_id PK, title, file_count, thumb, discovered_at, updated_at,
        indexed_at, attempts, last_error, dead)
 files(id, album_id → albums, file_id, search_name, storage, slug, mime,
-      media, size, uploaded_at)          UNIQUE(album_id, file_id)
-files_fts   FTS5 trigram index over search_name (external content, triggers)
+      media, extension, size, uploaded_at) UNIQUE(album_id, file_id)
+files_fts   FTS5 trigram index over search_name, storage, and slug
+            (external content, triggers)
 albums_fts  FTS5 trigram index over title
 ```
 
-FTS indexes are maintained incrementally by triggers on every insert. New
-metadata is produced by the separate `sync` process.
+FTS indexes are maintained incrementally by triggers on every insert. Version 2
+rebuilds `files_fts` once to include existing storage names and slugs; version 3
+backfills and indexes exact filename extensions. Stop sync and serve, run
+`uv run bunkr-index init`, then restart them. New metadata is produced by the
+separate `sync` process.
 
 ### SQLite runtime compatibility
 
@@ -117,11 +130,14 @@ recreates only the two derived FTS indexes.
 
 ## Important indexes
 
-- `files(search_name)` handles one- and two-character prefix search without a
-  table scan.
-- `files(uploaded_at DESC, id DESC)` serves newest-first sorting without a
-  temporary sort, including deep pagination.
-- FTS5 trigram supports indexed filename substring search.
+- `files(search_name COLLATE NOCASE)` handles one- and two-character prefix
+  search without a table scan.
+- `files(extension, uploaded_at DESC, id DESC)` serves exact extension filters
+  without scanning every filename.
+- `files(uploaded_at DESC, id DESC)` serves newest-first listing without a
+  temporary sort.
+- FTS5 trigram supports indexed filename substring search across every stored
+  filename alias.
 
 ## Separate sync and serve processes
 

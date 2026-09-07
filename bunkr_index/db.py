@@ -9,7 +9,7 @@ from typing import Iterable, Optional
 
 from . import config
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 3
 
 # --------------------------------------------------------------------------
 # Connections / schema
@@ -26,6 +26,88 @@ def connect(path=None) -> sqlite3.Connection:
     con.execute("PRAGMA foreign_keys=ON")
     con.execute("PRAGMA busy_timeout=30000")
     return con
+
+_FILES_FTS_COLUMNS = ("search_name", "storage", "slug")
+
+
+def _files_fts_columns(con: sqlite3.Connection) -> tuple[str, ...]:
+    return tuple(row["name"] for row in con.execute("PRAGMA table_info(files_fts)"))
+
+
+def _create_files_fts(con: sqlite3.Connection) -> None:
+    con.execute(
+        """
+        CREATE VIRTUAL TABLE files_fts USING fts5(
+            search_name, storage, slug,
+            content='files',
+            content_rowid='id',
+            tokenize='trigram'
+        )
+        """
+    )
+    con.execute(
+        """
+        CREATE TRIGGER files_ai AFTER INSERT ON files BEGIN
+            INSERT INTO files_fts(rowid, search_name, storage, slug)
+            VALUES (new.id, new.search_name, new.storage, new.slug);
+        END
+        """
+    )
+    con.execute(
+        """
+        CREATE TRIGGER files_ad AFTER DELETE ON files BEGIN
+            INSERT INTO files_fts(files_fts, rowid, search_name, storage, slug)
+            VALUES ('delete', old.id, old.search_name, old.storage, old.slug);
+        END
+        """
+    )
+    con.execute(
+        """
+        CREATE TRIGGER files_au AFTER UPDATE ON files BEGIN
+            INSERT INTO files_fts(files_fts, rowid, search_name, storage, slug)
+            VALUES ('delete', old.id, old.search_name, old.storage, old.slug);
+            INSERT INTO files_fts(rowid, search_name, storage, slug)
+            VALUES (new.id, new.search_name, new.storage, new.slug);
+        END
+        """
+    )
+
+
+def _upgrade_files_fts(con: sqlite3.Connection) -> None:
+    if _files_fts_columns(con) == _FILES_FTS_COLUMNS:
+        return
+    with con:
+        for trigger in ("files_ai", "files_ad", "files_au"):
+            con.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+        con.execute("DROP TABLE IF EXISTS files_fts")
+        _create_files_fts(con)
+        con.execute("INSERT INTO files_fts(files_fts) VALUES('rebuild')")
+
+def _file_extension(name: object) -> str:
+    base = str(name or "").replace("\\", "/").rsplit("/", 1)[-1]
+    _, dot, suffix = base.rpartition(".")
+    suffix = suffix.casefold()
+    return suffix if dot and 1 <= len(suffix) <= 16 and suffix.isascii() and suffix.isalnum() else ""
+
+
+def _upgrade_files_extension(con: sqlite3.Connection) -> None:
+    columns = {row["name"] for row in con.execute("PRAGMA table_info(files)")}
+    if "extension" not in columns:
+        with con:
+            con.execute(
+                "ALTER TABLE files ADD COLUMN extension TEXT NOT NULL DEFAULT ''"
+            )
+            con.create_function("file_extension", 1, _file_extension)
+            con.execute(
+                "UPDATE files SET extension = file_extension(search_name) "
+                "WHERE extension = ''"
+            )
+    con.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_files_extension_uploaded_id
+        ON files(extension, uploaded_at DESC, id DESC)
+        """
+    )
 
 
 def init_db(con: sqlite3.Connection) -> None:
@@ -54,6 +136,7 @@ def init_db(con: sqlite3.Connection) -> None:
             slug        TEXT NOT NULL DEFAULT '',
             mime        TEXT NOT NULL DEFAULT '',
             media       TEXT NOT NULL DEFAULT '',
+            extension   TEXT NOT NULL DEFAULT '',
             size        INTEGER NOT NULL DEFAULT 0,
             uploaded_at TEXT
         );
@@ -61,32 +144,12 @@ def init_db(con: sqlite3.Connection) -> None:
         CREATE UNIQUE INDEX IF NOT EXISTS idx_files_album_file
             ON files(album_id, file_id);
         CREATE INDEX IF NOT EXISTS idx_files_album ON files(album_id);
-        CREATE INDEX IF NOT EXISTS idx_files_search ON files(search_name);
+        CREATE INDEX IF NOT EXISTS idx_files_search_nocase
+            ON files(search_name COLLATE NOCASE);
         CREATE INDEX IF NOT EXISTS idx_files_uploaded_id
             ON files(uploaded_at DESC, id DESC);
+        DROP INDEX IF EXISTS idx_files_search;
         DROP INDEX IF EXISTS idx_files_uploaded;
-
-        CREATE VIRTUAL TABLE IF NOT EXISTS files_fts USING fts5(
-            search_name,
-            content='files',
-            content_rowid='id',
-            tokenize='trigram'
-        );
-
-        CREATE TRIGGER IF NOT EXISTS files_ai AFTER INSERT ON files BEGIN
-            INSERT INTO files_fts(rowid, search_name)
-            VALUES (new.id, new.search_name);
-        END;
-        CREATE TRIGGER IF NOT EXISTS files_ad AFTER DELETE ON files BEGIN
-            INSERT INTO files_fts(files_fts, rowid, search_name)
-            VALUES ('delete', old.id, old.search_name);
-        END;
-        CREATE TRIGGER IF NOT EXISTS files_au AFTER UPDATE ON files BEGIN
-            INSERT INTO files_fts(files_fts, rowid, search_name)
-            VALUES ('delete', old.id, old.search_name);
-            INSERT INTO files_fts(rowid, search_name)
-            VALUES (new.id, new.search_name);
-        END;
 
         CREATE VIRTUAL TABLE IF NOT EXISTS albums_fts USING fts5(
             title,
@@ -114,8 +177,13 @@ def init_db(con: sqlite3.Connection) -> None:
         );
         """
     )
+    _upgrade_files_extension(con)
+    _upgrade_files_fts(con)
     con.execute(
-        "INSERT OR IGNORE INTO meta(key, value) VALUES('schema_version', ?)",
+        """
+        INSERT INTO meta(key, value) VALUES('schema_version', ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        """,
         (str(SCHEMA_VERSION),),
     )
     con.commit()
@@ -245,8 +313,8 @@ def replace_album_files(
                 """
                 INSERT INTO files
                     (album_id, file_id, search_name, storage, slug, mime, media,
-                     size, uploaded_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     extension, size, uploaded_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -257,6 +325,7 @@ def replace_album_files(
                         f.get("slug", ""),
                         f.get("mime", ""),
                         f.get("media", ""),
+                        f.get("extension") or _file_extension(f["search_name"]),
                         int(f.get("size") or 0),
                         f.get("uploaded_at"),
                     )

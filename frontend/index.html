@@ -105,6 +105,7 @@ body {
 }
 .searchline:focus-within { border-color: rgba(120, 230, 177, .58); }
 .searchline.loading { opacity: .72; }
+.searchhint { margin: 7px 2px 0; color: var(--muted); font-size: 11px; line-height: 1.4; }
 #q {
   flex: 1;
   min-width: 0;
@@ -117,6 +118,17 @@ body {
   font-weight: 400;
 }
 #q::placeholder { color: var(--faint); }
+#ext {
+  width: 5.4em;
+  padding: 8px 9px;
+  background: var(--panel-strong);
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  outline: none;
+  font-size: 12px;
+}
+#ext::placeholder { color: var(--faint); }
 .filters { display: contents; }
 select {
   appearance: none;
@@ -296,6 +308,7 @@ select option { background: var(--panel-strong); color: var(--fg); }
         <option value="audio">audio</option>
         <option value="other">other</option>
       </select>
+      <input id="ext" type="search" inputmode="text" maxlength="16" placeholder="ext" autocomplete="off" spellcheck="false" aria-label="Filter by file extension">
       <select id="sort" title="Sort results" aria-label="Sort results">
         <option value="relevance">relevance</option>
         <option value="newest">newest</option>
@@ -304,6 +317,7 @@ select option { background: var(--panel-strong); color: var(--fg); }
       </select>
       <button id="go" type="button">Search</button>
     </div>
+    <p class="searchhint">3+ characters search anywhere; shorter queries match filename prefixes. Use quotes for an exact phrase, or filter by extension.</p>
     <div id="albumsec"></div>
     <div id="results" aria-live="polite"></div>
     <div class="pager" id="pager" hidden>
@@ -329,6 +343,7 @@ select option { background: var(--panel-strong); color: var(--fg); }
 const $ = (id) => document.getElementById(id);
 const PER_PAGE = 20;
 let page = 1, total = 0, timer = null, loading = false, hasNext = false;
+let nextCursor = null, pageCursors = [null];
 let searchGeneration = 0;
 
 async function getJSON(url) {
@@ -379,6 +394,12 @@ function setLoading(value) {
   $("searchline").classList.toggle("loading", value);
   $("prev").disabled = value || page <= 1;
   $("next").disabled = value || !hasNext;
+}
+
+function restartSearch() {
+  page = 1;
+  nextCursor = null;
+  pageCursors = [null];
 }
 
 window.addEventListener("error", (e) => {
@@ -466,11 +487,16 @@ function renderGroups(items) {
 async function search() {
   const searchId = ++searchGeneration;
   const q = $("q").value.trim();
+  const ext = $("ext").value.trim().replace(/^\./, "").toLowerCase();
+  const cursor = pageCursors[page - 1];
   const params = new URLSearchParams({
     media: $("media").value, sort: $("sort").value, page: String(page), per: String(PER_PAGE)
   });
   if (q) params.set("q", q);
+  if (ext) params.set("ext", ext);
+  if (cursor) params.set("cursor", cursor);
   hasNext = false;
+  nextCursor = null;
   setLoading(true);
   empty("Searching…");
   $("albumsec").innerHTML = "";
@@ -489,7 +515,8 @@ async function search() {
       empty(q ? "No matching files found." : "No indexed files yet.");
       return;
     }
-    hasNext = page * PER_PAGE < total && d.results.length === PER_PAGE;
+    hasNext = Boolean(d.has_more);
+    nextCursor = d.next_cursor || null;
     renderGroups(d.results);
     $("pager").hidden = false;
     $("pageinfo").textContent =
@@ -507,21 +534,40 @@ async function search() {
   }
 }
 
-$("go").addEventListener("click", () => { if (!loading) { page = 1; search(); } });
+$("go").addEventListener("click", () => {
+  if (!loading) { restartSearch(); search(); }
+});
 $("q").addEventListener("keydown", e => {
-  if (e.key === "Enter" && !loading) { page = 1; search(); }
+  if (e.key === "Enter" && !loading) { restartSearch(); search(); }
 });
 $("q").addEventListener("input", () => {
   clearTimeout(timer);
-  timer = setTimeout(() => { page = 1; search(); }, 400);
+  timer = setTimeout(() => { restartSearch(); search(); }, 400);
 });
-$("media").addEventListener("change", () => { if (!loading) { page = 1; search(); } });
-$("sort").addEventListener("change", () => { if (!loading) { page = 1; search(); } });
+$("media").addEventListener("change", () => {
+  if (!loading) { restartSearch(); search(); }
+});
+$("sort").addEventListener("change", () => {
+  if (!loading) { restartSearch(); search(); }
+});
+$("ext").addEventListener("input", () => {
+  clearTimeout(timer);
+  timer = setTimeout(() => { restartSearch(); search(); }, 400);
+});
 $("prev").addEventListener("click", () => {
-  if (!loading && page > 1) { page--; search(); window.scrollTo({ top: 0, behavior: "smooth" }); }
+  if (!loading && page > 1) {
+    page--;
+    search();
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
 });
 $("next").addEventListener("click", () => {
-  if (!loading && page * PER_PAGE < total) { page++; search(); window.scrollTo({ top: 0, behavior: "smooth" }); }
+  if (!loading && hasNext && nextCursor) {
+    pageCursors[page] = nextCursor;
+    page++;
+    search();
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
 });
 
 stats();
