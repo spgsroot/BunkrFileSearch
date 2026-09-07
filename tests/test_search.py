@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from bunkr_index import db, search
+from bunkr_index import api, db, search
 
 
 class SearchFilesTest(unittest.TestCase):
@@ -134,6 +134,47 @@ class SearchFilesTest(unittest.TestCase):
             ("al%",),
         ).fetchall()
         self.assertIn("SEARCH", plan[0][3])
+
+
+class RandomAlbumTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.con = db.connect(Path(self.tmp.name) / "index.db")
+        db.init_db(self.con)
+        for i in range(6):
+            db.replace_album_files(
+                self.con, f"al{i}", f"Album {i}", f"https://cdn/x/{i}.png",
+                [{"file_id": j, "search_name": f"f{i}_{j}.jpg", "media": "Image",
+                  "size": 1, "uploaded_at": "2024-01-01T00:00:00"}
+                 for j in range(3 + i)],
+            )
+        db.replace_album_files(
+            self.con, "dead", "Dead", "", [{"file_id": 1, "search_name": "x.jpg",
+            "media": "Image", "size": 1, "uploaded_at": None}],
+        )
+        self.con.execute("UPDATE albums SET dead = 1 WHERE bunkr_id = 'dead'")
+        self.con.execute(
+            "INSERT INTO albums (bunkr_id, title, discovered_at, updated_at) "
+            "VALUES ('pend', 'Pending', '2024-01-01T00:00:00', '2024-01-01T00:00:00')"
+        )
+        self.con.commit()
+
+    def tearDown(self) -> None:
+        self.con.close()
+        self.tmp.cleanup()
+
+    def test_random_picks_only_live_indexed_albums_with_files(self) -> None:
+        picked = [api._pick_random_album(self.con) for _ in range(40)]
+        self.assertTrue(picked)
+        for album in picked:
+            self.assertIsNotNone(album)
+            self.assertTrue(album["bunkr_id"].startswith("al"))
+            self.assertGreater(album["real_files"], 0)
+            self.assertIn("thumb", album)
+
+    def test_random_has_variety(self) -> None:
+        ids = {api._pick_random_album(self.con)["bunkr_id"] for _ in range(30)}
+        self.assertGreater(len(ids), 1)
 
 
 if __name__ == "__main__":

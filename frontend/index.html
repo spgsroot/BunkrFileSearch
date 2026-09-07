@@ -245,6 +245,135 @@ select option { background: var(--panel-strong); color: var(--fg); }
 .pager button:not(:disabled):hover { border-color: rgba(120, 230, 177, .6); color: var(--accent); }
 .pager button:disabled { color: var(--faint); cursor: default; opacity: .55; }
 .pager span { min-width: 72px; color: var(--muted); font-size: 12px; text-align: center; }
+.toolbtn {
+  padding: 8px 13px;
+  background: var(--panel-strong);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.toolbtn:hover { color: var(--fg); border-color: rgba(145, 185, 255, .55); }
+#rand { color: var(--accent); border-color: rgba(120, 230, 177, .4); }
+#rand:hover { color: var(--fg); background: var(--accent-soft); }
+#browsetools {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin: 30px 0 14px;
+}
+#browsetools h2 {
+  margin: 0;
+  color: var(--fg);
+  font-size: 15px;
+  font-weight: 650;
+}
+#browsetools h2 small { color: var(--muted); font-size: 11px; font-weight: 500; }
+#browsetools .side { display: flex; align-items: center; gap: 10px; }
+.viewtoggle {
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  overflow: hidden;
+}
+.viewtoggle button {
+  padding: 8px 12px;
+  background: var(--panel-strong);
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+}
+.viewtoggle button + button { border-left: 1px solid var(--line); }
+.viewtoggle button.active { color: var(--accent); background: var(--accent-soft); }
+#albums.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
+  gap: 14px;
+}
+.acard {
+  display: block;
+  overflow: hidden;
+  background: rgba(20, 28, 37, .62);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  text-decoration: none;
+  color: var(--fg);
+  min-width: 0;
+}
+.acard:hover { border-color: rgba(120, 230, 177, .55); }
+.acard .thumb {
+  position: relative;
+  display: block;
+  aspect-ratio: 4 / 3;
+  background: linear-gradient(140deg, #16202b, #1c2a38);
+}
+.acard .thumb img { position: relative; width: 100%; height: 100%; object-fit: cover; display: block; }
+.acard .letter {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--faint);
+  font-size: 40px;
+  font-weight: 700;
+}
+.acard .atitle {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  padding: 10px 11px 2px;
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.32;
+  overflow-wrap: anywhere;
+}
+.acard .ameta { display: block; padding: 2px 11px 11px; color: var(--muted); font-size: 10.5px; }
+#albums.list { display: block; }
+.arow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  margin-top: 6px;
+  background: rgba(20, 28, 37, .55);
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  text-decoration: none;
+  color: var(--fg);
+}
+.arow:hover { border-color: rgba(120, 230, 177, .55); }
+.arow .thumb {
+  position: relative;
+  flex: 0 0 56px;
+  width: 56px;
+  height: 42px;
+  overflow: hidden;
+  border-radius: 7px;
+  background: linear-gradient(140deg, #16202b, #1c2a38);
+}
+.arow .thumb img { position: relative; width: 100%; height: 100%; object-fit: cover; display: block; }
+.arow .letter {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--faint);
+  font-size: 17px;
+  font-weight: 700;
+}
+.arow .aname { min-width: 0; flex: 1; font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+.arow .ameta { flex: 0 0 auto; color: var(--muted); font-size: 11px; white-space: nowrap; }
+#albums .bmsg { padding: 26px 0; color: var(--muted); text-align: center; }
+#loadmorewrap { text-align: center; margin-top: 22px; }
+#loadmore { padding: 9px 22px; }
+#loadmore:disabled { opacity: .5; cursor: default; }
 #support {
   position: fixed; right: 18px; bottom: 18px; z-index: 50;
   display: flex; flex-direction: column; align-items: flex-end; gap: 8px;
@@ -285,6 +414,19 @@ select option { background: var(--panel-strong); color: var(--fg); }
   #q { flex-basis: 100%; padding: 4px 2px 10px; }
   select { flex: 1; }
   .row.album { align-items: flex-start; flex-direction: column; gap: 6px; }
+  #browsetools { flex-wrap: wrap; }
+  #browsetools .side { flex-wrap: wrap; }
+  #albums.grid { grid-template-columns: repeat(auto-fill, minmax(136px, 1fr)); gap: 10px; }
+  .searchline #q { flex-basis: 100%; }
+  #loadmore { width: 100%; }
+}
+@media (max-width: 420px) {
+  #albums.grid { grid-template-columns: repeat(2, 1fr); gap: 9px; }
+  .acard .atitle { font-size: 11.5px; padding: 8px 9px 1px; }
+  .acard .ameta { padding: 1px 9px 9px; }
+  .arow { padding: 7px 9px; gap: 9px; }
+  .arow .ameta { display: none; }
+  .viewtoggle button { padding: 8px 9px; }
 }
 </style>
 </head>
@@ -315,9 +457,22 @@ select option { background: var(--panel-strong); color: var(--fg); }
         <option value="oldest">oldest</option>
         <option value="size">largest</option>
       </select>
+      <button id="rand" class="toolbtn" type="button" title="Open a random album">Random</button>
       <button id="go" type="button">Search</button>
     </div>
-    <p class="searchhint">3+ characters search anywhere; shorter queries match filename prefixes. Use quotes for an exact phrase, or filter by extension.</p>
+    <p class="searchhint">Browse the latest albums below, or search filenames: 3+ characters search anywhere, shorter queries match prefixes. Use quotes for an exact phrase, or filter by extension.</p>
+    <div id="browsetools" hidden>
+      <h2>Latest albums <small id="browsecount"></small></h2>
+      <div class="side">
+        <button id="randTop" class="toolbtn" type="button" title="Open a random album">Random</button>
+        <div class="viewtoggle" role="group" aria-label="View">
+          <button id="viewGrid" type="button" aria-pressed="true">Grid</button>
+          <button id="viewList" type="button" aria-pressed="false">List</button>
+        </div>
+      </div>
+    </div>
+    <div id="albums" class="grid" hidden></div>
+    <div id="loadmorewrap" hidden><button id="loadmore" class="toolbtn" type="button">Load more</button></div>
     <div id="albumsec"></div>
     <div id="results" aria-live="polite"></div>
     <div class="pager" id="pager" hidden>
@@ -345,6 +500,8 @@ const PER_PAGE = 20;
 let page = 1, total = 0, timer = null, loading = false, hasNext = false;
 let nextCursor = null, pageCursors = [null];
 let searchGeneration = 0;
+let browseItems = [], browsePage = 1, browseDone = false, browseLoading = false;
+let albumView = "grid";
 
 async function getJSON(url) {
   const r = await fetch(url);
@@ -427,6 +584,133 @@ function renderAlbumMatches(data) {
   sec.innerHTML = html;
 }
 
+function albumThumb(a) {
+  const letter = esc(((a.title || a.bunkr_id || "?").trim().charAt(0) || "?").toUpperCase());
+  const img = a.thumb
+    ? `<img loading="lazy" src="${esc(a.thumb)}" alt="" onerror="this.remove()">`
+    : "";
+  return `<span class="thumb"><span class="letter">${letter}</span>${img}</span>`;
+}
+
+function albumCard(a) {
+  return (
+    `<a class="acard" href="https://bunkr.cr/a/${esc(a.bunkr_id)}" target="_blank" rel="noopener">` +
+    albumThumb(a) +
+    `<span class="atitle">${esc(a.title || a.bunkr_id)}</span>` +
+    `<span class="ameta">${Number(a.real_files || a.file_count || 0).toLocaleString()} files</span></a>`
+  );
+}
+
+function albumRow(a) {
+  return (
+    `<a class="arow" href="https://bunkr.cr/a/${esc(a.bunkr_id)}" target="_blank" rel="noopener">` +
+    albumThumb(a) +
+    `<span class="aname">${esc(a.title || a.bunkr_id)}</span>` +
+    `<span class="ameta">${Number(a.real_files || a.file_count || 0).toLocaleString()} files</span></a>`
+  );
+}
+
+function renderAlbums() {
+  const box = $("albums");
+  box.className = albumView;
+  if (!browseItems.length) {
+    box.innerHTML = "";
+    return;
+  }
+  const build = albumView === "grid" ? albumCard : albumRow;
+  box.innerHTML = browseItems.map(build).join("");
+}
+
+function setBrowseVisible(visible) {
+  $("browsetools").hidden = !visible;
+  $("albums").hidden = !visible;
+  $("loadmorewrap").hidden = !visible || browseDone;
+}
+
+function showBrowse() {
+  searchGeneration++;
+  restartSearch();
+  $("albumsec").innerHTML = "";
+  $("results").innerHTML = "";
+  $("pager").hidden = true;
+  setBrowseVisible(true);
+  if (!browseItems.length) loadAlbums(true);
+}
+
+async function loadAlbums(reset) {
+  if (browseLoading) return;
+  if (reset) {
+    browseItems = [];
+    browsePage = 1;
+    browseDone = false;
+    $("browsecount").textContent = "";
+    renderAlbums();
+  }
+  browseLoading = true;
+  const more = $("loadmore");
+  more.disabled = true;
+  try {
+    const d = await getJSON(`/api/albums?page=${browsePage}&per=30&indexed=true`);
+    const rows = (d.results || []).filter(r => r.indexed && !r.dead && Number(r.real_files || 0) > 0);
+    browseItems.push(...rows);
+    if (d.total) $("browsecount").textContent = `· ${Number(d.total).toLocaleString()} total`;
+    if (rows.length) browsePage++;
+    browseDone = d.results.length < 30;
+    if (!browseItems.length && browseDone) {
+      $("albums").innerHTML = '<div class="bmsg">No indexed albums yet.</div>';
+    }
+  } catch (err) {
+    if (!browseItems.length) {
+      $("albums").innerHTML = `<div class="bmsg">Unable to load albums: ${esc(err.message)}</div>`;
+    }
+    browseDone = true;
+  } finally {
+    browseLoading = false;
+    renderAlbums();
+    more.disabled = browseDone;
+    $("loadmorewrap").hidden = browseDone;
+  }
+}
+
+function setView(view) {
+  albumView = view;
+  $("albums").className = view;
+  const grid = $("viewGrid"), list = $("viewList");
+  grid.classList.toggle("active", view === "grid");
+  list.classList.toggle("active", view === "list");
+  grid.setAttribute("aria-pressed", String(view === "grid"));
+  list.setAttribute("aria-pressed", String(view === "list"));
+  renderAlbums();
+}
+
+async function openRandom() {
+  const buttons = [$("rand"), $("randTop")];
+  if (buttons.some(b => b.disabled)) return;
+  buttons.forEach(b => { b.disabled = true; b.textContent = "…"; });
+  let win = null;
+  try { win = window.open("", "_blank"); } catch { win = null; }
+  try {
+    const a = await getJSON("/api/albums/random");
+    const url = "https://bunkr.cr/a/" + a.bunkr_id;
+    if (win) { win.location.href = url; }
+    else {
+      const fallback = window.open(url, "_blank", "noopener");
+      if (!fallback) window.location.href = url;
+    }
+  } catch (err) {
+    if (win) win.close();
+    if (!$("results").querySelector(".row")) empty("Random failed: " + err.message);
+  } finally {
+    setTimeout(() => buttons.forEach(b => { b.disabled = false; b.textContent = "Random"; }), 900);
+  }
+}
+
+function onQuery() {
+  if (loading) return;
+  restartSearch();
+  if ($("q").value.trim()) search(); else showBrowse();
+}
+
 function renderGroups(items) {
   const box = $("results");
   box.innerHTML = "";
@@ -487,6 +771,8 @@ function renderGroups(items) {
 async function search() {
   const searchId = ++searchGeneration;
   const q = $("q").value.trim();
+  if (!q) { showBrowse(); return; }
+  setBrowseVisible(false);
   const ext = $("ext").value.trim().replace(/^\./, "").toLowerCase();
   const cursor = pageCursors[page - 1];
   const params = new URLSearchParams({
@@ -512,7 +798,7 @@ async function search() {
     renderAlbumMatches(albums);
     if (!d.results.length) {
       $("pager").hidden = true;
-      empty(q ? "No matching files found." : "No indexed files yet.");
+      empty("No matching files found.");
       return;
     }
     hasNext = Boolean(d.has_more);
@@ -534,26 +820,25 @@ async function search() {
   }
 }
 
-$("go").addEventListener("click", () => {
-  if (!loading) { restartSearch(); search(); }
-});
+$("go").addEventListener("click", onQuery);
 $("q").addEventListener("keydown", e => {
-  if (e.key === "Enter" && !loading) { restartSearch(); search(); }
+  if (e.key === "Enter" && !loading) onQuery();
 });
 $("q").addEventListener("input", () => {
   clearTimeout(timer);
-  timer = setTimeout(() => { restartSearch(); search(); }, 400);
+  timer = setTimeout(onQuery, 400);
 });
-$("media").addEventListener("change", () => {
-  if (!loading) { restartSearch(); search(); }
-});
-$("sort").addEventListener("change", () => {
-  if (!loading) { restartSearch(); search(); }
-});
+$("media").addEventListener("change", () => { if (!loading) onQuery(); });
+$("sort").addEventListener("change", () => { if (!loading) onQuery(); });
 $("ext").addEventListener("input", () => {
   clearTimeout(timer);
-  timer = setTimeout(() => { restartSearch(); search(); }, 400);
+  timer = setTimeout(onQuery, 400);
 });
+$("rand").addEventListener("click", openRandom);
+$("randTop").addEventListener("click", openRandom);
+$("viewGrid").addEventListener("click", () => setView("grid"));
+$("viewList").addEventListener("click", () => setView("list"));
+$("loadmore").addEventListener("click", () => loadAlbums(false));
 $("prev").addEventListener("click", () => {
   if (!loading && page > 1) {
     page--;
@@ -571,7 +856,8 @@ $("next").addEventListener("click", () => {
 });
 
 stats();
-search();
+setView("grid");
+showBrowse();
 
 // Donate widget: toggle + click-to-copy addresses.
 $("supportToggle").addEventListener("click", () => {

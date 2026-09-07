@@ -64,8 +64,12 @@ breaking the database.
 - **One- or two-character queries** use a case-insensitive indexed prefix
   match. For example, `sn` finds `SNOW_…`, but not `…_sn_…`. Trigram indexes
   cannot efficiently search substrings shorter than three characters.
-- **An empty query** lists the newest files. `newest`, `oldest`, and `size`
-  sorting work in every search mode; prefix-mode `relevance` is alphabetical.
+- **With no query** the home view is a browsable grid of the latest indexed
+  albums: thumbnail cards with a Grid/List toggle, a Load more button, and a
+  Random button that jumps to a random album. Typing a filename query switches
+  to file search; clearing it returns to the album browser. `newest`, `oldest`,
+  and `size` sorting work in file search; prefix-mode `relevance` is
+  alphabetical.
 - Media filtering accepts `image`, `video`, `audio`, or `other`; `ext` filters
   an exact filename extension such as `jpg` or `mp4`.
 - Match counting is capped at 50,000. Above the cap the API returns
@@ -81,6 +85,7 @@ current query.
 |---|---|---|
 | GET | `/api/search?q=&media=&ext=&sort=&page=&per=&cursor=` | Search files; returns `{total, truncated, has_more, next_cursor, results[], …}`. `ext` is a case-insensitive exact extension filter. `cursor` is an opaque token from the prior response and takes precedence over `page`. |
 | GET | `/api/albums?q=&page=&per=&indexed=` | List or search albums. |
+| GET | `/api/albums/random` | Return one random indexed album with files. |
 | GET | `/api/stats` | Return index counters. |
 | POST | `/api/albums` with `{"urls": [...]}` | Enqueue albums for crawling. |
 | DELETE | `/api/albums/{bunkr_id}` | Delete an album and its files. |

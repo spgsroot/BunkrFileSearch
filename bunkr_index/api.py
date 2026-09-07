@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import random
 import re
 import time
 from pathlib import Path
@@ -182,7 +183,7 @@ async def api_albums(
                 rows = con.execute(
                     """
                     SELECT a.bunkr_id, a.title, a.file_count, a.thumb,
-                           a.indexed_at IS NOT NULL AS indexed,
+                           a.indexed_at IS NOT NULL AS indexed, a.dead AS dead,
                            (SELECT COUNT(*) FROM files f WHERE f.album_id = a.bunkr_id)
                                AS real_files
                     FROM albums a
@@ -203,6 +204,46 @@ async def api_albums(
         return out
 
     return await _respond(request, key, build)
+
+
+_RANDOM_TRIES = 50
+_RANDOM_SQL = """
+SELECT a.bunkr_id, a.title, a.thumb, a.file_count,
+       (SELECT COUNT(*) FROM files f WHERE f.album_id = a.bunkr_id) AS real_files,
+       a.updated_at
+FROM albums a
+WHERE a.id >= ? AND a.indexed_at IS NOT NULL AND a.dead = 0
+ORDER BY a.id LIMIT 1
+"""
+
+
+def _pick_random_album(con) -> dict | None:
+    """Pick a random indexed album that still has files, via id sampling."""
+    (max_id,) = con.execute("SELECT MAX(id) FROM albums").fetchone()
+    if not max_id:
+        return None
+    for _ in range(_RANDOM_TRIES):
+        row = con.execute(_RANDOM_SQL, (random.randint(1, max_id),)).fetchone()
+        if row and row["real_files"]:
+            return dict(row)
+    return None
+
+
+def _random_album_thread() -> dict | None:
+    con = _con()
+    try:
+        return _pick_random_album(con)
+    finally:
+        con.close()
+
+
+@get("/api/albums/random")
+async def api_random_album() -> dict[str, Any]:
+    """Return one random indexed album with files (uncached by design)."""
+    album = await asyncio.to_thread(_random_album_thread)
+    if album is None:
+        raise HTTPException(status_code=404, detail="no indexed albums yet")
+    return album
 
 
 @post("/api/albums", sync_to_thread=True, status_code=200)
@@ -267,6 +308,7 @@ app = Litestar(
     route_handlers=[
         api_search,
         api_albums,
+        api_random_album,
         api_add_albums,
         api_delete_album,
         api_stats,
