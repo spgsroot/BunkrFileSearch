@@ -312,8 +312,8 @@ def replace_album_files(
     with con:
         con.execute(
             """
-            INSERT INTO albums (bunkr_id, title, discovered_at, updated_at, indexed_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO albums (bunkr_id, title, thumb, discovered_at, updated_at, indexed_at)
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(bunkr_id) DO UPDATE SET
                 title = excluded.title,
                 file_count = ?,
@@ -324,7 +324,7 @@ def replace_album_files(
                 last_error = '',
                 dead = 0
             """,
-            (bunkr_id, title, ts, ts, ts, len(files)),
+            (bunkr_id, title, thumb, ts, ts, ts, len(files)),
         )
         con.execute("DELETE FROM files WHERE album_id = ?", (bunkr_id,))
         if files:

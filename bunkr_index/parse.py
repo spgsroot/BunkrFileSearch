@@ -75,7 +75,9 @@ def _js_array_slice(source: str, start: int) -> str | None:
 _CARD_RE = re.compile(
     r'<a\b[^>]*href="([^"]*/a/([A-Za-z0-9]+))"[^>]*>(.*?)</a>', re.S
 )
-_THUMB_ALT_RE = re.compile(r'class="[^"]*thumb-img[^"]*"[^>]*alt="([^"]*)"')
+_THUMB_IMG_TAG_RE = re.compile(
+    r'<img\b[^>]*\bclass="[^"]*thumb-img[^"]*"[^>]*>'
+)
 _COUNT_RE = re.compile(r"(\d+)\s+files?\b", re.I)
 
 
@@ -163,7 +165,7 @@ def parse_album_page(page_html: str) -> dict:
 
 
 def parse_balbums_page(page_html: str) -> list[dict]:
-    """Parse balbums.st album cards into {url, bunkr_id, title, file_count}."""
+    """Parse balbums.st album cards into {url, bunkr_id, title, thumb, file_count}."""
     out: list[dict] = []
     seen: set[str] = set()
     for m in _CARD_RE.finditer(page_html):
@@ -171,8 +173,17 @@ def parse_balbums_page(page_html: str) -> list[dict]:
         if bunkr_id in seen:
             continue
         seen.add(bunkr_id)
-        tm = _THUMB_ALT_RE.search(body)
-        title = _html.unescape(tm.group(1)).strip() if tm else ""
+        thumb = ""
+        it = _THUMB_IMG_TAG_RE.search(body)
+        img_tag = it.group(0) if it else ""
+        if img_tag:
+            sm = re.search(r'\bsrc="([^"]*)"', img_tag)
+            if sm:
+                thumb = _html.unescape(sm.group(1)).strip()
+            am = re.search(r'\balt="([^"]*)"', img_tag)
+            title = _html.unescape(am.group(1)).strip() if am else ""
+        else:
+            title = ""
         if not title:
             # Fallback: pull the visible title from the card text.
             text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", body)).strip()
@@ -188,6 +199,7 @@ def parse_balbums_page(page_html: str) -> list[dict]:
                 "url": url,
                 "bunkr_id": bunkr_id,
                 "title": title,
+                "thumb": thumb,
                 "file_count": count,
             }
         )
