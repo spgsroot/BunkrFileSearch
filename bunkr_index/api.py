@@ -24,6 +24,7 @@ from . import config, db, search
 from .parse import ALBUM_ID_RE
 
 _FRONTEND = Path(config.FRONTEND_DIR)
+_DIST = _FRONTEND / "dist"
 
 
 def _init_schema() -> None:
@@ -328,18 +329,17 @@ def api_stats() -> dict[str, Any]:
 
 @get("/", sync_to_thread=True, media_type="text/html")
 def index() -> str:
-    return (_FRONTEND / "index.html").read_text(encoding="utf-8")
+    return (_DIST / "index.html").read_text(encoding="utf-8")
 
 
 _SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
     "Referrer-Policy": "no-referrer",
-    # The frontend is one self-contained page with an inline <script> and
-    # <style> block, hence 'unsafe-inline'. Tighten to external assets with
-    # nonces if the page ever gets split into files.
+    # The frontend is a Svelte SPA: JS/CSS are external built assets, served
+    # same-origin. Inline is not required.
     "Content-Security-Policy": (
-        "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
+        "default-src 'self'; script-src 'self'; style-src 'self'; "
         "img-src 'self' https: data:; connect-src 'self'; base-uri 'none'; "
         "frame-ancestors 'none'"
     ),
@@ -362,7 +362,7 @@ app = Litestar(
         api_stats,
         index,
         create_static_files_router(
-            path="/static", directories=[_FRONTEND], html_mode=True
+            path="/assets", directories=[_DIST / "assets"]
         ),
     ],
     on_startup=[_init_schema],

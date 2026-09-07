@@ -4,3 +4,8 @@ __pycache__
 *.pyc
 data
 .DS_Store
+frontend/node_modules
+frontend/src
+frontend/package.json
+frontend/package-lock.json
+frontend/vite.config.js
