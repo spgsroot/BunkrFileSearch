@@ -23,6 +23,10 @@ from . import config, db, parse
 
 log = logging.getLogger("discover")
 
+# A run stops after this many failed pages; anything below is skipped and
+# can be re-fetched by a later run (or --start-page).
+MAX_PAGE_ERRORS = 5
+
 
 def _page_url(page: int, per: int, sort: str) -> str:
     return (
@@ -51,79 +55,83 @@ async def discover(
     results in page order. Returns summary dict."""
     summary = {"pages": 0, "cards": 0, "new_albums": 0, "errors": 0, "stopped": ""}
     t_start = time.monotonic()
-    async with httpx.AsyncClient(
-        headers=config.HEADERS, timeout=config.TIMEOUT, follow_redirects=True
-    ) as client:
-        pending: deque[tuple[int, asyncio.Task]] = deque()
-        next_page = start_page
+    # One connection for the whole run; opening one per page (= per upsert)
+    # pays WAL pragma and connection setup costs thousands of times.
+    con = db.connect(db_path)
+    try:
+        async with httpx.AsyncClient(
+            headers=config.HEADERS, timeout=config.TIMEOUT, follow_redirects=True
+        ) as client:
+            pending: deque[tuple[int, asyncio.Task]] = deque()
+            next_page = start_page
 
-        def slot_free() -> bool:
-            if max_pages is not None and next_page - start_page >= max_pages:
-                return False
-            return len(pending) < workers
+            def slot_free() -> bool:
+                if max_pages is not None and next_page - start_page >= max_pages:
+                    return False
+                return len(pending) < workers
 
-        while True:
-            # Prefetch up to `workers` pages ahead.
-            while slot_free():
-                page = next_page
-                next_page += 1
-                pending.append(
-                    (page, asyncio.create_task(_fetch_page(client, _page_url(page, per, sort))))
-                )
+            while True:
+                # Prefetch up to `workers` pages ahead.
+                while slot_free():
+                    page = next_page
+                    next_page += 1
+                    pending.append(
+                        (page, asyncio.create_task(
+                            _fetch_page(client, _page_url(page, per, sort))
+                        ))
+                    )
 
-            if not pending:
-                summary["stopped"] = (
-                    "max_pages" if max_pages is not None else "pages_exhausted"
-                )
-                break
+                if not pending:
+                    summary["stopped"] = (
+                        "max_pages" if max_pages is not None else "pages_exhausted"
+                    )
+                    break
 
-            # Commit strictly in page order.
-            page, task = pending.popleft()
-            try:
-                text = await task
-            except httpx.HTTPError as exc:
-                log.warning("page %d failed: %s", page, exc)
-                summary["errors"] += 1
-                if summary["errors"] >= 5:
-                    summary["stopped"] = "repeated_errors"
+                # Commit strictly in page order.
+                page, task = pending.popleft()
+                try:
+                    text = await task
+                except Exception as exc:  # HTTP errors AND body decode errors
+                    log.warning("page %d failed: %s", page, exc)
+                    summary["errors"] += 1
+                    if summary["errors"] >= MAX_PAGE_ERRORS:
+                        summary["stopped"] = "repeated_errors"
+                        for _, t in pending:
+                            t.cancel()
+                        break
+                    continue
+
+                cards = parse.parse_balbums_page(text)
+                summary["pages"] += 1
+                summary["cards"] += len(cards)
+                if not cards:
+                    summary["stopped"] = "empty_page"
                     for _, t in pending:
                         t.cancel()
                     break
-                continue
 
-            cards = parse.parse_balbums_page(text)
-            summary["pages"] += 1
-            summary["cards"] += len(cards)
-            if not cards:
-                summary["stopped"] = "empty_page"
-                for _, t in pending:
-                    t.cancel()
-                break
-
-            con = db.connect(db_path)
-            try:
                 new_count = db.upsert_discovered(con, cards)
-            finally:
-                con.close()
-            summary["new_albums"] += new_count
+                summary["new_albums"] += new_count
 
-            if stop_when_known and new_count == 0:
-                # Reached the region already fully discovered on this run's
-                # ordering; the tail of the directory is already known.
-                summary["stopped"] = "all_known"
-                for _, t in pending:
-                    t.cancel()
-                break
+                if stop_when_known and new_count == 0:
+                    # Reached the region already fully discovered on this run's
+                    # ordering; the tail of the directory is already known.
+                    summary["stopped"] = "all_known"
+                    for _, t in pending:
+                        t.cancel()
+                    break
 
-            if summary["pages"] % 25 == 0:
-                elapsed = time.monotonic() - t_start
-                log.info(
-                    "page %d: %d cards (%d new) total_new=%d  %.1f pages/s",
-                    page, len(cards), new_count, summary["new_albums"],
-                    summary["pages"] / elapsed if elapsed else 0.0,
-                )
-            if delay:
-                await asyncio.sleep(delay)
+                if summary["pages"] % 25 == 0:
+                    elapsed = time.monotonic() - t_start
+                    log.info(
+                        "page %d: %d cards (%d new) total_new=%d  %.1f pages/s",
+                        page, len(cards), new_count, summary["new_albums"],
+                        summary["pages"] / elapsed if elapsed else 0.0,
+                    )
+                if delay:
+                    await asyncio.sleep(delay)
+    finally:
+        con.close()
 
     if not summary["stopped"] and summary["pages"]:
         summary["stopped"] = "max_pages" if max_pages is not None else "complete"

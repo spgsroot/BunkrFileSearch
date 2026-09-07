@@ -651,11 +651,14 @@ async function loadAlbums(reset) {
   more.disabled = true;
   try {
     const d = await getJSON(`/api/albums?page=${browsePage}&per=30&indexed=true`);
-    const rows = (d.results || []).filter(r => r.indexed && !r.dead && Number(r.real_files || 0) > 0);
+    const results = d.results || [];
+    const rows = results.filter(r => r.indexed && !r.dead && Number(r.real_files || 0) > 0);
     browseItems.push(...rows);
     if (d.total) $("browsecount").textContent = `· ${Number(d.total).toLocaleString()} total`;
-    if (rows.length) browsePage++;
-    browseDone = d.results.length < 30;
+    // Advance by server rows, not by displayable rows: a page full of
+    // zero-file albums must not re-request the same page forever.
+    if (results.length) browsePage++;
+    browseDone = results.length < 30;
     if (!browseItems.length && browseDone) {
       $("albums").innerHTML = '<div class="bmsg">No indexed albums yet.</div>';
     }

@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Optional
 
 from . import config
 
@@ -87,7 +87,8 @@ def _file_extension(name: object) -> str:
     base = str(name or "").replace("\\", "/").rsplit("/", 1)[-1]
     _, dot, suffix = base.rpartition(".")
     suffix = suffix.casefold()
-    return suffix if dot and 1 <= len(suffix) <= 16 and suffix.isascii() and suffix.isalnum() else ""
+    ok = dot and 1 <= len(suffix) <= 16 and suffix.isascii() and suffix.isalnum()
+    return suffix if ok else ""
 
 
 def _upgrade_files_extension(con: sqlite3.Connection) -> None:
@@ -205,11 +206,11 @@ def upsert_discovered(con: sqlite3.Connection, albums: Iterable[dict]) -> int:
     if not rows:
         return 0
     ids = [r["bunkr_id"] for r in rows]
+    marks = ",".join("?" * len(rows))
     known = {
         r["bunkr_id"]
         for r in con.execute(
-            "SELECT bunkr_id FROM albums WHERE bunkr_id IN (%s)"
-            % ",".join("?" * len(rows)),
+            f"SELECT bunkr_id FROM albums WHERE bunkr_id IN ({marks})",
             ids,
         ).fetchall()
     }
@@ -263,22 +264,40 @@ def set_album_pending(con: sqlite3.Connection, bunkr_ids: Iterable[str]) -> list
     return ids
 
 
+# Shared queue predicate: never-indexed albums (then stale ones when a
+# refresh window is given). Two `?` params: the stale-days sentinel and the
+# days value. Single source for queue reads and queue counting.
+_PENDING_WHERE = """
+    dead = 0 AND attempts < 5
+      AND (indexed_at IS NULL
+           OR (indexed_at IS NOT NULL AND ? IS NOT NULL
+               AND indexed_at < datetime('now', '-' || ? || ' days')))
+"""
+
+
 def pending_for_crawl(
-    con: sqlite3.Connection, limit: int = 200, include_stale_days: Optional[int] = None
+    con: sqlite3.Connection, limit: int = 200, include_stale_days: int | None = None
 ) -> list[sqlite3.Row]:
     """Not-yet-indexed albums first (newest discovery first), then optionally
     albums whose index is older than `stale_days`."""
-    q = """
+    q = f"""
         SELECT bunkr_id, title, attempts FROM albums
-        WHERE dead = 0 AND attempts < 5
-          AND (indexed_at IS NULL
-               OR (indexed_at IS NOT NULL AND ? IS NOT NULL
-                   AND indexed_at < datetime('now', '-' || ? || ' days')))
+        WHERE {_PENDING_WHERE}
         ORDER BY CASE WHEN indexed_at IS NULL THEN 0 ELSE 1 END,
                  discovered_at DESC
         LIMIT ?
     """
     return con.execute(q, (include_stale_days, include_stale_days, limit)).fetchall()
+
+
+def count_pending_for_crawl(
+    con: sqlite3.Connection, include_stale_days: int | None = None
+) -> int:
+    """Exact size of the crawl queue — the same set pending_for_crawl drains."""
+    return con.execute(
+        f"SELECT COUNT(*) FROM albums WHERE {_PENDING_WHERE}",
+        (include_stale_days, include_stale_days),
+    ).fetchone()[0]
 
 
 def replace_album_files(
@@ -341,10 +360,13 @@ def mark_album_error(
     ts = now_iso()
     with con:
         if dead:
+            # A dead album is not 'indexed now': leave indexed_at untouched
+            # (a previous successful crawl timestamp is history, not state)
+            # so dead rows never leak into `indexed_at IS NOT NULL` listings.
             con.execute(
                 "UPDATE albums SET attempts = attempts + 1, last_error = ?,"
-                " indexed_at = ?, dead = 1, updated_at = ? WHERE bunkr_id = ?",
-                (error[:500], ts, ts, bunkr_id),
+                " dead = 1, updated_at = ? WHERE bunkr_id = ?",
+                (error[:500], ts, bunkr_id),
             )
         else:
             con.execute(
@@ -381,11 +403,21 @@ def stats(con: sqlite3.Connection) -> dict:
     (last_disc,) = con.execute(
         "SELECT MAX(discovered_at) FROM albums"
     ).fetchone()
+    # Pending must match the queue predicate: albums with attempts >= 5 are
+    # never picked up again, so report them separately instead of as pending.
+    (pending,) = con.execute(
+        "SELECT COUNT(*) FROM albums"
+        " WHERE dead = 0 AND attempts < 5 AND indexed_at IS NULL"
+    ).fetchone()
+    (stuck,) = con.execute(
+        "SELECT COUNT(*) FROM albums WHERE dead = 0 AND attempts >= 5"
+    ).fetchone()
     return {
         "albums_total": total,
         "albums_indexed": indexed,
         "albums_dead": dead,
-        "albums_pending": max(total - indexed - dead, 0),
+        "albums_pending": pending,
+        "albums_stuck": stuck,
         "files": files,
         "last_indexed_at": last_idx,
         "last_discovered_at": last_disc,

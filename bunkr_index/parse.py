@@ -21,7 +21,54 @@ _TS_FMT = "%H:%M:%S %d/%m/%Y"
 
 _OG_TITLE_RE = re.compile(r'property="og:title"\s+content="(.*?)"')
 _TITLE_TAG_RE = re.compile(r"<title>(.*?)</title>", re.S)
-_BLOB_RE = re.compile(r"window\.albumFiles\s*=\s*(\[.*?\]);", re.S)
+_BLOB_START_RE = re.compile(r"window\.albumFiles\s*=\s*\[")
+
+# Canonical album-id extraction. A Bunkr album id is alphanumeric; every
+# ingestion boundary (CLI, HTTP API, parsers) must agree on that.
+ALBUM_ID_RE = re.compile(r"/a/([A-Za-z0-9]+)")
+_ALBUM_ID_FULL_RE = re.compile(r"[A-Za-z0-9]+")
+
+
+def extract_album_id(raw: str) -> str | None:
+    """Extract a Bunkr album id from an album URL or a bare id string.
+
+    Returns None for input that is neither, so callers can reject garbage
+    instead of persisting arbitrary text as an id."""
+    match = ALBUM_ID_RE.search(raw)
+    if match:
+        return match.group(1)
+    token = raw.strip()
+    return token if _ALBUM_ID_FULL_RE.fullmatch(token) else None
+
+
+def _js_array_slice(source: str, start: int) -> str | None:
+    """Return the balanced ``[ ... ]`` literal beginning at ``start``.
+
+    Quote- and escape-aware: a ``"];`` sequence inside a filename string must
+    not terminate the blob early (that used to silently drop every file after
+    it). Returns None when the array never closes (truncated page)."""
+    depth = 0
+    quote = ""
+    escaped = False
+    for i in range(start, len(source)):
+        ch = source[i]
+        if quote:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == quote:
+                quote = ""
+            continue
+        if ch in "\"'":
+            quote = ch
+        elif ch in "[{":
+            depth += 1
+        elif ch in "]}":
+            depth -= 1
+            if depth == 0:
+                return source[start : i + 1]
+    return None
 
 # balbums.st album cards are plain <a> tags whose href points at a Bunkr
 # album (/a/<id>) and whose thumbnail <img class="thumb-img"> alt holds title.
@@ -71,11 +118,15 @@ def parse_album_page(page_html: str) -> dict:
     if m:
         thumb = _html.unescape(m.group(1)).strip()
 
-    mb = _BLOB_RE.search(page_html)
-    if not mb:
+    ms = _BLOB_START_RE.search(page_html)
+    if not ms:
         return {"title": title, "thumb": thumb, "files": [], "blob": False,
                 "parse_error": False}
-    blob = mb.group(1)
+    blob = _js_array_slice(page_html, ms.end() - 1)
+    if blob is None:
+        # Page cut off mid-array: treat like a missing blob but flag it.
+        return {"title": title, "thumb": thumb, "files": [], "blob": False,
+                "parse_error": True}
 
     # Anchor on item-start lines `id: <num>` and slice between them. This is
     # robust against braces/quotes appearing inside filename strings.

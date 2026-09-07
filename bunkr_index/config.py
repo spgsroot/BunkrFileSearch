@@ -53,3 +53,7 @@ MIN_REQUEST_INTERVAL = 0.15
 
 # Discovery default page size accepted by balbums.st (20 or 100 only).
 BALBUMS_PER = 100
+
+# Optional bearer token guarding mutating API endpoints (POST/DELETE
+# /api/albums). Empty string = open API, intended for local-only serving.
+ADMIN_TOKEN = os.environ.get("BUNKR_ADMIN_TOKEN", "")

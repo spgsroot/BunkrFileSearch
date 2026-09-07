@@ -6,7 +6,7 @@ import base64
 import json
 import re
 import sqlite3
-from typing import Any, Optional
+from typing import Any
 
 # Runs of spaces/underscores/dashes: treated as equivalent separators when
 # the user types one separator but the filename uses another.
@@ -94,7 +94,7 @@ def fts_query(q: str) -> str | None:
     return " AND ".join(f"({clause})" for clause in clauses)
 
 
-def _cursor_context(q: str, media: Optional[str], extension: Optional[str],
+def _cursor_context(q: str, media: str | None, extension: str | None,
                     sort: str, mode: str) -> dict[str, str]:
     return {
         "q": q, "media": media or "", "extension": extension or "",
@@ -108,7 +108,7 @@ def _encode_cursor(context: dict[str, str], key: dict[str, Any]) -> str:
     return base64.urlsafe_b64encode(raw).decode().rstrip("=")
 
 
-def _decode_cursor(token: Optional[str], context: dict[str, str]) -> dict[str, Any] | None:
+def _decode_cursor(token: str | None, context: dict[str, str]) -> dict[str, Any] | None:
     if not token:
         return None
     try:
@@ -124,7 +124,7 @@ def _decode_cursor(token: Optional[str], context: dict[str, str]) -> dict[str, A
     return key
 
 
-def _media_where(media: Optional[str]) -> tuple[str, list]:
+def _media_where(media: str | None) -> tuple[str, list]:
     if not media:
         return "", []
     group = MEDIA_GROUPS.get(media.lower())
@@ -136,14 +136,14 @@ def _media_where(media: Optional[str]) -> tuple[str, list]:
             v for g in ("image", "video", "audio") for v in MEDIA_GROUPS[g]
         )
         marks = ",".join("?" * len(known))
-        return "AND f.media NOT IN (%s)" % marks, list(known)
+        return f"AND f.media NOT IN ({marks})", list(known)
     marks = ",".join("?" * len(group))
-    return "AND f.media IN (%s)" % marks, list(group)
+    return f"AND f.media IN ({marks})", list(group)
 
 _EXTENSION = re.compile(r"^[a-z0-9]{1,16}$", re.ASCII)
 
 
-def _extension_where(extension: Optional[str]) -> tuple[str, list]:
+def _extension_where(extension: str | None) -> tuple[str, list]:
     if not extension:
         return "", []
     value = extension.removeprefix(".").casefold()
@@ -275,12 +275,12 @@ def _file_rows_from_hits(con: sqlite3.Connection, hits_sql: str, params: list,
 def search_files(
     con: sqlite3.Connection,
     q: str = "",
-    media: Optional[str] = None,
-    extension: Optional[str] = None,
+    media: str | None = None,
+    extension: str | None = None,
     sort: str = "relevance",
     limit: int = 20,
     offset: int = 0,
-    cursor: Optional[str] = None,
+    cursor: str | None = None,
 ) -> dict:
     """Search file metadata with capped counts and cursor-capable pagination."""
     q = q.strip()

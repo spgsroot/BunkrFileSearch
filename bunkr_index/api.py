@@ -4,23 +4,26 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import json
 import random
-import re
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Annotated, Any, Callable
+from typing import Annotated, Any
+
 from litestar import Litestar, Request, delete, get, post
 from litestar.exceptions import HTTPException
 from litestar.openapi.config import OpenAPIConfig
+from litestar.params import QueryParameter
 from litestar.response import Response
 from litestar.static_files import create_static_files_router
-from litestar.params import QueryParameter
+
 from . import cache as cache_module
 from . import config, db, search
+from .parse import ALBUM_ID_RE
 
 _FRONTEND = Path(config.FRONTEND_DIR)
-_ALBUM_ID_RE = re.compile(r"/a/([A-Za-z0-9]+)")
 
 
 def _init_schema() -> None:
@@ -73,22 +76,23 @@ async def _respond(
     request: Request,
     key: str,
     build: Callable[[], dict],
-    *,
-    took_ms: int | None = None,
 ) -> Response:
     """Serve ``build()``'s payload through the TTL cache with ETag support.
 
     ``build`` runs off the event loop via ``asyncio.to_thread``. It must return
-    JSON-serializable data without timing fields; when ``took_ms`` is supplied
-    it is appended only to fresh 200 responses so the cached body and ETag stay
-    stable across requests.
+    JSON-serializable data without timing fields. ``took_ms`` measures how long
+    ``build()`` actually took (0 on cache hits) and is appended after caching,
+    so the cached body and ETag stay stable across requests.
     """
     cached = _SEARCH_CACHE.get(key)
     if cached is not None:
         body: bytes = cached
+        took_ms = 0
         hit = True
     else:
+        t0 = time.perf_counter()
         body = _json_body(await asyncio.to_thread(build))
+        took_ms = round((time.perf_counter() - t0) * 1000)
         _SEARCH_CACHE.set(key, body)
         hit = False
     etag = _etag(body)
@@ -99,11 +103,30 @@ async def _respond(
     }
     if _etag_matches(request.headers.get("if-none-match") or "", etag):
         return Response(content=b"", status_code=304, headers=headers)
-    if took_ms is not None:
-        payload = json.loads(body)
-        payload["took_ms"] = took_ms
-        body = _json_body(payload)
+    payload = json.loads(body)
+    payload["took_ms"] = took_ms
+    body = _json_body(payload)
     return Response(content=body, media_type="application/json", headers=headers)
+
+
+def _require_admin(request: Request) -> None:
+    """Guard mutating endpoints when BUNKR_ADMIN_TOKEN is configured.
+
+    With no token configured the API stays open (local self-hosted default);
+    with a token set, enqueue/delete require `Authorization: Bearer <token>`
+    or an `X-Admin-Token` header."""
+    token = config.ADMIN_TOKEN
+    if not token:
+        return
+    bearer = request.headers.get("authorization", "").removeprefix("Bearer ").strip()
+    if hmac.compare_digest(bearer, token):
+        return
+    if hmac.compare_digest(request.headers.get("x-admin-token", ""), token):
+        return
+    raise HTTPException(
+        status_code=401,
+        detail="admin token required for mutating endpoints (BUNKR_ADMIN_TOKEN)",
+    )
 
 
 @get("/api/search")
@@ -126,7 +149,6 @@ async def api_search(
     per: Annotated[int, QueryParameter(default=20, ge=1, le=100)],
     cursor: Annotated[str | None, QueryParameter(default=None, max_length=1024)],
 ) -> Response:
-    t0 = time.perf_counter()
     key = _cache_key(
         "/api/search", q, media or "", ext or "", sort, page, per, cursor or ""
     )
@@ -146,9 +168,7 @@ async def api_search(
         out.update(page=page, per=per)
         return out
 
-    return await _respond(
-        request, key, build, took_ms=round((time.perf_counter() - t0) * 1000)
-    )
+    return await _respond(request, key, build)
 
 
 @get("/api/albums")
@@ -170,12 +190,14 @@ async def api_albums(
                 )
             else:
                 params: list[Any] = []
-                where = ""
+                # Dead albums never belong in browse listings, whatever flag
+                # their indexed_at happens to carry from an earlier crawl.
+                where = "WHERE a.dead = 0"
                 if indexed is not None:
-                    where = (
-                        "WHERE a.indexed_at IS NOT NULL"
+                    where += (
+                        " AND a.indexed_at IS NOT NULL"
                         if indexed
-                        else "WHERE a.indexed_at IS NULL"
+                        else " AND a.indexed_at IS NULL"
                     )
                 total = con.execute(
                     "SELECT COUNT(*) FROM albums a " + where, params
@@ -247,7 +269,8 @@ async def api_random_album() -> dict[str, Any]:
 
 
 @post("/api/albums", sync_to_thread=True, status_code=200)
-def api_add_albums(data: dict[str, Any]) -> dict[str, Any]:
+def api_add_albums(request: Request, data: dict[str, Any]) -> dict[str, Any]:
+    _require_admin(request)
     urls = data.get("urls")
     if not isinstance(urls, list) or not urls:
         raise HTTPException(
@@ -258,7 +281,7 @@ def api_add_albums(data: dict[str, Any]) -> dict[str, Any]:
     for u in urls:
         if not isinstance(u, str):
             continue
-        m = _ALBUM_ID_RE.search(u)
+        m = ALBUM_ID_RE.search(u)
         if m:
             ids.append(m.group(1))
     if not ids:
@@ -268,6 +291,7 @@ def api_add_albums(data: dict[str, Any]) -> dict[str, Any]:
         accepted = db.set_album_pending(con, ids)
     finally:
         con.close()
+    _SEARCH_CACHE.clear()
     return {
         "accepted": accepted,
         "note": "run `uv run bunkr-index sync` (or `crawl`) to index them",
@@ -275,15 +299,18 @@ def api_add_albums(data: dict[str, Any]) -> dict[str, Any]:
 
 
 @delete("/api/albums/{bunkr_id:str}", sync_to_thread=True, status_code=200)
-def api_delete_album(bunkr_id: str) -> dict[str, str]:
+def api_delete_album(request: Request, bunkr_id: str) -> dict[str, str]:
+    _require_admin(request)
     con = _con()
     try:
         cur = con.execute("DELETE FROM albums WHERE bunkr_id = ?", (bunkr_id,))
+        deleted = cur.rowcount
         con.commit()
     finally:
         con.close()
-    if cur.rowcount == 0:
+    if deleted == 0:
         raise HTTPException(status_code=404, detail="album not found")
+    _SEARCH_CACHE.clear()
     return {"deleted": bunkr_id}
 
 
@@ -304,6 +331,27 @@ def index() -> str:
     return (_FRONTEND / "index.html").read_text(encoding="utf-8")
 
 
+_SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    # The frontend is one self-contained page with an inline <script> and
+    # <style> block, hence 'unsafe-inline'. Tighten to external assets with
+    # nonces if the page ever gets split into files.
+    "Content-Security-Policy": (
+        "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
+        "img-src 'self' https: data:; connect-src 'self'; base-uri 'none'; "
+        "frame-ancestors 'none'"
+    ),
+}
+
+
+def _security_headers(response: Response) -> Response:
+    for key, value in _SECURITY_HEADERS.items():
+        response.headers.setdefault(key, value)
+    return response
+
+
 app = Litestar(
     route_handlers=[
         api_search,
@@ -318,6 +366,7 @@ app = Litestar(
         ),
     ],
     on_startup=[_init_schema],
+    after_request=_security_headers,
     openapi_config=OpenAPIConfig(
         title="Bunkr File Index", version="0.1.0"
     ),

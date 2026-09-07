@@ -12,6 +12,7 @@ import asyncio
 import logging
 import os
 import random
+import sqlite3
 import time
 from pathlib import Path
 
@@ -82,18 +83,39 @@ def _lock_owner_is_alive(value: str) -> bool:
     return _process_start_ticks(pid) == recorded_start
 
 
-def acquire_crawl_lock() -> bool:
-    """Acquire the exclusive, stale-safe lock for crawling."""
-    config.DATA_DIR.mkdir(parents=True, exist_ok=True)
+def _try_create_lock() -> bool:
+    """Atomically create the lock file; False if it already exists."""
     try:
-        if LOCK_FILE.exists():
-            if _lock_owner_is_alive(LOCK_FILE.read_text()):
-                return False
-            LOCK_FILE.unlink(missing_ok=True)
-        LOCK_FILE.write_text(_lock_identity())
-        return True
+        fd = os.open(LOCK_FILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        return False
     except OSError:
         return False
+    with os.fdopen(fd, "w") as fh:
+        fh.write(_lock_identity())
+    return True
+
+
+def acquire_crawl_lock() -> bool:
+    """Acquire the exclusive, stale-safe lock for crawling.
+
+    Creation is O_EXCL-atomic: two processes racing a missing or stale lock
+    can no longer both win (check-then-write TOCTOU)."""
+    config.DATA_DIR.mkdir(parents=True, exist_ok=True)
+    if _try_create_lock():
+        return True
+    try:
+        if _lock_owner_is_alive(LOCK_FILE.read_text()):
+            return False
+    except OSError:
+        return False
+    # Stale lock: remove it and retry the atomic create once. Whoever wins
+    # the retry owns the crawl; the loser gets FileExistsError -> False.
+    try:
+        LOCK_FILE.unlink()
+    except OSError:
+        return False
+    return _try_create_lock()
 
 
 def release_crawl_lock() -> None:
@@ -275,8 +297,10 @@ async def crawl_ids(
             follow_redirects=True,
         ) as client:
             picker = DomainPicker()
+            completed = 0
 
             async def work(album_id: str) -> None:
+                nonlocal completed
                 async with sem:
                     await pace()
                     status, parsed, rate_limited = await fetch_album(
@@ -284,13 +308,23 @@ async def crawl_ids(
                     )
                     if status == "ok":
                         breaker.ok()
-                        n = db.replace_album_files(
-                            con, album_id, parsed["title"], parsed["thumb"],
-                            parsed["files"],
-                        )
-                        summary["ok"] += 1
-                        summary["files"] += n
-                        log.debug("ok %s: %d files", album_id, n)
+                        try:
+                            n = db.replace_album_files(
+                                con, album_id, parsed["title"], parsed["thumb"],
+                                parsed["files"],
+                            )
+                        except (sqlite3.Error, KeyError, TypeError, ValueError) as exc:
+                            # One malformed album (duplicate file ids, bad row
+                            # shape) must not abort the whole wave: record it
+                            # as a normal per-album error and continue.
+                            log.warning("db write failed for %s: %s", album_id, exc)
+                            db.mark_album_error(con, album_id, f"db write: {exc}")
+                            summary["error"] += 1
+                            summary["errors"].append((album_id, f"db write: {exc}"))
+                        else:
+                            summary["ok"] += 1
+                            summary["files"] += n
+                            log.debug("ok %s: %d files", album_id, n)
                     elif status == "dead":
                         breaker.ok()
                         db.mark_album_error(con, album_id, "HTTP 404", dead=True)
@@ -307,18 +341,18 @@ async def crawl_ids(
                                     "rate-limited (403/429/5xx across domains): "
                                     "pausing crawl %.0fs", pause
                                 )
+                    completed += 1
+                    if completed % 50 == 0 or completed == len(bunkr_ids):
+                        log.info(
+                            "progress %d/%d ok=%d err=%d dead=%d files=%d",
+                            completed, len(bunkr_ids),
+                            summary["ok"], summary["error"], summary["dead"],
+                            summary["files"],
+                        )
 
-            for i in range(0, len(bunkr_ids), workers):
-                batch = bunkr_ids[i : i + workers]
-                await asyncio.gather(*(work(b) for b in batch))
-                if (i // workers + 1) % 10 == 0:
-                    log.info(
-                        "progress %d/%d ok=%d err=%d dead=%d files=%d",
-                        min(i + workers, len(bunkr_ids)),
-                        len(bunkr_ids),
-                        summary["ok"], summary["error"], summary["dead"],
-                        summary["files"],
-                    )
+            # The semaphore already bounds concurrency; chunking into waves of
+            # `workers` would make every wave wait for its slowest album.
+            await asyncio.gather(*(work(b) for b in bunkr_ids))
     finally:
         con.close()
     return summary
@@ -369,15 +403,9 @@ async def crawl_all(
                 if limit is not None:
                     remaining = max(limit - processed, 0)
                 else:
-                    remaining = con.execute(
-                        """
-                        SELECT COUNT(*) FROM albums WHERE dead = 0 AND attempts < 5
-                          AND (indexed_at IS NULL
-                               OR (indexed_at IS NOT NULL AND ? IS NOT NULL
-                                   AND indexed_at < datetime('now', '-' || ? || ' days')))
-                        """,
-                        (stale_days, stale_days),
-                    ).fetchone()[0]
+                    # Same WHERE as pending_for_crawl, so the ETA matches the
+                    # queue being drained (single source lives in db.py).
+                    remaining = db.count_pending_for_crawl(con, stale_days)
                 eta_h = remaining / rate / 3600
             else:
                 eta_h = 0.0
@@ -405,7 +433,11 @@ def run(db_path=None, ids: list[str] | None = None, **kwargs) -> dict:
     finally:
         con.close()
     if ids:
-        ids = db.set_album_pending(db.connect(db_path), ids)
+        con = db.connect(db_path)
+        try:
+            ids = db.set_album_pending(con, ids)
+        finally:
+            con.close()
         # ids-path only honours worker-related knobs.
         crawl_kwargs = {k: kwargs[k] for k in ("workers", "min_interval") if k in kwargs}
         return asyncio.run(crawl_ids(db_path, ids, **crawl_kwargs))

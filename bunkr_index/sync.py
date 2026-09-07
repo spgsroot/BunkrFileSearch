@@ -2,8 +2,9 @@
 
 Run this separately from ``serve``. It owns the crawler lock for the entire
 ``discover -> crawl`` cycle, writes the shared SQLite database, and schedules
-the next cycle from this cycle's start time.
-explicit add/delete API operations) and never starts network scraping.
+the next cycle from this cycle's start time. The ``serve`` process only
+answers reads (plus explicit add/delete API operations) and never starts
+network scraping.
 """
 
 from __future__ import annotations

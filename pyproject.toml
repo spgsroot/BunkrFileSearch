@@ -7,7 +7,11 @@ dependencies = [
     "litestar>=2.17",
     "uvicorn[standard]>=0.29",
     "httpx>=0.27",
-    "beautifulsoup4>=4.12",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.6",
 ]
 
 [project.scripts]
@@ -19,3 +23,10 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["bunkr_index"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP"]

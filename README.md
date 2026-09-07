@@ -87,8 +87,8 @@ current query.
 | GET | `/api/albums?q=&page=&per=&indexed=` | List or search albums. |
 | GET | `/api/albums/random` | Return one random indexed album with files. |
 | GET | `/api/stats` | Return index counters. |
-| POST | `/api/albums` with `{"urls": [...]}` | Enqueue albums for crawling. |
-| DELETE | `/api/albums/{bunkr_id}` | Delete an album and its files. |
+| POST | `/api/albums` with `{"urls": [...]}` | Enqueue albums for crawling. Guarded by `BUNKR_ADMIN_TOKEN` when set. |
+| DELETE | `/api/albums/{bunkr_id}` | Delete an album and its files. Guarded by `BUNKR_ADMIN_TOKEN` when set. |
 | GET | `/` | Serve the web UI. |
 
 Search responses carry `Cache-Control: no-cache` and a content `ETag`; clients
@@ -97,7 +97,8 @@ while the result is unchanged. Identical requests are also served from a
 bounded in-process TTL cache (1,024 entries, 60 seconds, LRU), so repeat
 queries and revalidations skip SQLite entirely; the `X-Cache: hit|miss`
 response header reports which path served the request. The TTL bounds
-staleness after new metadata is crawled.
+staleness after new metadata is crawled; enqueue/delete API calls clear the
+cache immediately, so their effect is visible on the next request.
 
 ## Database schema
 
@@ -190,9 +191,17 @@ docker compose down
 Environment variables:
 
 - `PORT`: external web port.
+- `BIND`: address the published port binds to; defaults to `127.0.0.1`
+  (localhost only). Set `BIND=0.0.0.0` to expose the UI on the network.
+- `BUNKR_ADMIN_TOKEN`: when set, `POST`/`DELETE /api/albums` require
+  `Authorization: Bearer <token>` (or an `X-Admin-Token` header). Leave unset
+  only when the service is unreachable from other machines.
 - `SYNC_WORKERS`: crawler concurrency.
 - `SYNC_MIN_INTERVAL`: minimum seconds between request starts.
 - `SYNC_INTERVAL_HOURS`: hours between sync cycle starts; defaults to `24`.
+
+The same variables apply outside Docker: `BUNKR_ADMIN_TOKEN` is read by
+`serve`, `BUNKR_DB` points all commands at a non-default database path.
 
 ## Scale and request politeness
 
@@ -213,11 +222,32 @@ Environment variables:
 - The selected domain remains sticky until a failure, avoiding unnecessary
   redirects and load on fallback domains.
 
+## Security notes
+
+The API has no accounts or sessions. Read endpoints are safe to expose;
+`POST` and `DELETE /api/albums` mutate state, so either keep the service on
+localhost (the Docker default binding) or set `BUNKR_ADMIN_TOKEN` when
+publishing it. Responses send a restrictive set of security headers
+(CSP, nosniff, DENY framing). Album and filename strings are always rendered
+through HTML escaping in the UI.
+
+## Development
+
+```bash
+uv sync                                   # includes the dev group (ruff)
+uv run ruff check .                       # lint
+uv run python -m unittest discover -s tests -v
+```
+
+CI (`.github/workflows/ci.yml`) runs lint and the test suite on Python
+3.10–3.13 for pushes and pull requests.
+
 ## Project layout
 
 ```text
 bunkr_index/
   config.py    domains, headers, paths, limits
+  cache.py     bounded TTL cache for API responses
   db.py        SQLite schema, FTS5 indexes, and data access
   parse.py     window.albumFiles and balbums.st card parsers
   discover.py  directory crawler with ordered commits
@@ -227,6 +257,7 @@ bunkr_index/
   api.py       Litestar API and static UI
   cli.py       init | discover | crawl | sync | serve | add | albums | stats
 frontend/index.html  minimal web UI
+tests/             unittest suite (parse/crawl/db/api/discover/search/cache)
 data/bunkr.db         working database, excluded from Git
 ```
 

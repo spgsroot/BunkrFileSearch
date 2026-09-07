@@ -15,7 +15,7 @@ from __future__ import annotations
 import threading
 import time
 from collections import OrderedDict
-from typing import Any, Optional
+from typing import Any
 
 
 class TTLCache:
@@ -32,9 +32,9 @@ class TTLCache:
         self.maxsize = maxsize
         self.ttl = ttl
         self._lock = threading.Lock()
-        self._data: "OrderedDict[str, tuple[float, Any]]" = OrderedDict()
+        self._data: OrderedDict[str, tuple[float, Any]] = OrderedDict()
 
-    def get(self, key: str) -> Optional[Any]:
+    def get(self, key: str) -> Any | None:
         """Return the cached value for ``key``, or None if absent/expired."""
         with self._lock:
             item = self._data.get(key)

@@ -47,7 +47,10 @@ def _discover(args):
     if s["stopped"] == "all_known":
         print("stopped early (--stop-known): only already-known albums on this page")
     if s["new_albums"]:
-        print(f"{s['new_albums']} new albums found - run `uv run bunkr-index sync` (or `crawl`) to index them")
+        print(
+            f"{s['new_albums']} new albums found - "
+            "run `uv run bunkr-index sync` (or `crawl`) to index them"
+        )
 
 
 def _crawl(args):
@@ -95,12 +98,18 @@ def _serve(args):
 
 
 def _add(args):
-    import re as _re
+    from . import parse
 
     ids = []
     for raw in args.ids:
-        m = _re.search(r"/a/([A-Za-z0-9]+)", raw)
-        ids.append(m.group(1) if m else raw)
+        album_id = parse.extract_album_id(raw)
+        if album_id is None:
+            print(f"skipping {raw!r}: not an album URL or id", file=sys.stderr)
+            continue
+        ids.append(album_id)
+    if not ids:
+        print("nothing to enqueue: no valid album URLs or ids given", file=sys.stderr)
+        return
     con = db.connect()
     try:
         db.init_db(con)
