@@ -269,8 +269,7 @@ def upsert_discovered(con: sqlite3.Connection, albums: Iterable[dict]) -> int:
         ON CONFLICT(bunkr_id) DO UPDATE SET
             title = excluded.title,
             file_count = excluded.file_count,
-            thumb = CASE WHEN excluded.thumb = '' THEN albums.thumb ELSE excluded.thumb END,
-            updated_at = excluded.updated_at
+            thumb = CASE WHEN excluded.thumb = '' THEN albums.thumb ELSE excluded.thumb END
         """,
         [
             {
