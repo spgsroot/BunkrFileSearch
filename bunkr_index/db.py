@@ -34,6 +34,40 @@ def _files_fts_columns(con: sqlite3.Connection) -> tuple[str, ...]:
     return tuple(row["name"] for row in con.execute("PRAGMA table_info(files_fts)"))
 
 
+def _files_fts_uses_detail_none(con: sqlite3.Connection) -> bool:
+    row = con.execute("SELECT sql FROM sqlite_master WHERE name = 'files_fts'").fetchone()
+    return bool(row and row["sql"] and "detail=none" in row["sql"])
+
+
+def _create_files_fts_triggers(con: sqlite3.Connection) -> None:
+    con.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS files_ai AFTER INSERT ON files BEGIN
+            INSERT INTO files_fts(rowid, search_name, storage, slug)
+            VALUES (new.id, new.search_name, new.storage, new.slug);
+        END
+        """
+    )
+    con.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS files_ad AFTER DELETE ON files BEGIN
+            INSERT INTO files_fts(files_fts, rowid, search_name, storage, slug)
+            VALUES ('delete', old.id, old.search_name, old.storage, old.slug);
+        END
+        """
+    )
+    con.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS files_au AFTER UPDATE ON files BEGIN
+            INSERT INTO files_fts(files_fts, rowid, search_name, storage, slug)
+            VALUES ('delete', old.id, old.search_name, old.storage, old.slug);
+            INSERT INTO files_fts(rowid, search_name, storage, slug)
+            VALUES (new.id, new.search_name, new.storage, new.slug);
+        END
+        """
+    )
+
+
 def _create_files_fts(con: sqlite3.Connection) -> None:
     con.execute(
         """
@@ -41,40 +75,27 @@ def _create_files_fts(con: sqlite3.Connection) -> None:
             search_name, storage, slug,
             content='files',
             content_rowid='id',
-            tokenize='trigram'
+            tokenize='trigram',
+            detail=none
         )
         """
     )
-    con.execute(
-        """
-        CREATE TRIGGER files_ai AFTER INSERT ON files BEGIN
-            INSERT INTO files_fts(rowid, search_name, storage, slug)
-            VALUES (new.id, new.search_name, new.storage, new.slug);
-        END
-        """
-    )
-    con.execute(
-        """
-        CREATE TRIGGER files_ad AFTER DELETE ON files BEGIN
-            INSERT INTO files_fts(files_fts, rowid, search_name, storage, slug)
-            VALUES ('delete', old.id, old.search_name, old.storage, old.slug);
-        END
-        """
-    )
-    con.execute(
-        """
-        CREATE TRIGGER files_au AFTER UPDATE ON files BEGIN
-            INSERT INTO files_fts(files_fts, rowid, search_name, storage, slug)
-            VALUES ('delete', old.id, old.search_name, old.storage, old.slug);
-            INSERT INTO files_fts(rowid, search_name, storage, slug)
-            VALUES (new.id, new.search_name, new.storage, new.slug);
-        END
-        """
-    )
+    _create_files_fts_triggers(con)
 
 
 def _upgrade_files_fts(con: sqlite3.Connection) -> None:
-    if _files_fts_columns(con) == _FILES_FTS_COLUMNS:
+    # Rebuild when the indexed columns or the tokenizer detail differ from
+    # what this version expects, or when a prior rebuild did not finish (the
+    # meta flag is only written after a successful rebuild). detail=none keeps
+    # the trigram index ~4x smaller (positions are dropped); adjacency is
+    # recovered in search.py with a LIKE post-filter.
+    needs_rebuild = (
+        _files_fts_columns(con) != _FILES_FTS_COLUMNS
+        or not _files_fts_uses_detail_none(con)
+        or _meta_get(con, "files_fts_rebuilt_detail_none") != "1"
+    )
+    if not needs_rebuild:
+        _create_files_fts_triggers(con)
         return
     with con:
         for trigger in ("files_ai", "files_ad", "files_au"):
@@ -82,6 +103,7 @@ def _upgrade_files_fts(con: sqlite3.Connection) -> None:
         con.execute("DROP TABLE IF EXISTS files_fts")
         _create_files_fts(con)
         con.execute("INSERT INTO files_fts(files_fts) VALUES('rebuild')")
+        _meta_set(con, "files_fts_rebuilt_detail_none", "1")
 
 def _file_extension(name: object) -> str:
     base = str(name or "").replace("\\", "/").rsplit("/", 1)[-1]
@@ -91,18 +113,34 @@ def _file_extension(name: object) -> str:
     return suffix if ok else ""
 
 
+def _meta_get(con: sqlite3.Connection, key: str) -> str | None:
+    row = con.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else None
+
+
+def _meta_set(con: sqlite3.Connection, key: str, value: str) -> None:
+    con.execute(
+        "INSERT INTO meta(key, value) VALUES(?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (key, value),
+    )
+
+
 def _upgrade_files_extension(con: sqlite3.Connection) -> None:
     columns = {row["name"] for row in con.execute("PRAGMA table_info(files)")}
     if "extension" not in columns:
+        con.execute("ALTER TABLE files ADD COLUMN extension TEXT NOT NULL DEFAULT ''")
+    if _meta_get(con, "files_extension_backfilled") != "1":
         with con:
-            con.execute(
-                "ALTER TABLE files ADD COLUMN extension TEXT NOT NULL DEFAULT ''"
-            )
+            # Drop files_au so backfilling 26M rows does not re-tokenize each
+            # one into files_fts; _upgrade_files_fts restores the trigger.
+            con.execute("DROP TRIGGER IF EXISTS files_au")
             con.create_function("file_extension", 1, _file_extension)
             con.execute(
                 "UPDATE files SET extension = file_extension(search_name) "
                 "WHERE extension = ''"
             )
+            _meta_set(con, "files_extension_backfilled", "1")
     con.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_files_extension_uploaded_id

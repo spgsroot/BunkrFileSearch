@@ -49,9 +49,22 @@ def fts_variants(q: str) -> list[str]:
     return seen
 
 
-def _fts_phrase(v: str) -> str:
-    """Quote one phrase for FTS5 (trigram): inner quotes doubled."""
-    return '"' + v.replace('"', '""') + '"'
+def _trigram_clause(word: str) -> str | None:
+    """AND of a word's 3-char trigrams over its separator-free sub-parts.
+
+    detail=none drops FTS5 positions, so phrase queries raise "phrase queries
+    are not supported"; a multi-character term is expressed as the AND of its
+    trigrams. Separator characters (dash, dot, underscore) are stripped here
+    because they are FTS5 operators when bare — the LIKE post-filter verifies
+    the exact separator form afterwards.
+    """
+    grams: list[str] = []
+    for sub in _SEP.split(word):
+        if len(sub) >= 3:
+            grams.extend(sub[i:i + 3] for i in range(len(sub) - 2))
+    if not grams:
+        return None
+    return "(" + " AND ".join(grams) + ")"
 
 
 def _like_escape(s: str) -> str:
@@ -60,20 +73,10 @@ def _like_escape(s: str) -> str:
 _QUERY_PART = re.compile(r'"([^"]+)"|(\S+)', re.UNICODE)
 
 
-def fts_query(q: str) -> str | None:
-    """Build an FTS5 query.
-
-    Unquoted words of three or more characters are required independently, so
-    ``diora audition`` finds a filename containing intervening text. Quoted
-    input remains an exact substring phrase. Queries containing a short word
-    retain the old whole-phrase behavior because trigram cannot index that
-    word independently.
-    """
-    q = q.strip()
-    if len(_norm(q)) < 3:
-        return None
+def _query_parts(q: str) -> list[str]:
+    """Split a query into words and quoted phrases (shared by fts + post-filter)."""
     parts: list[str] = []
-    for match in _QUERY_PART.finditer(q):
+    for match in _QUERY_PART.finditer(q.strip()):
         quoted = match.group(1)
         if quoted is not None:
             parts.append(quoted)
@@ -81,17 +84,56 @@ def fts_query(q: str) -> str | None:
         word = match.group(2)
         parts.extend(part for part in _SEP.split(word) if part)
     if not parts or any(len(_norm(part)) < 3 for part in parts):
-        parts = [q]
+        parts = [q.strip()]
+    return parts
 
+
+def fts_query(q: str) -> str | None:
+    """Build an FTS5 query over the detail=none trigram index.
+
+    Unquoted words of three or more characters are required independently, so
+    ``diora audition`` finds a filename containing intervening text. Each word
+    is expanded to the AND of its trigrams (no phrase support under
+    detail=none). Quoted input contributes one part whose trigrams must all
+    match.
+    """
+    q = q.strip()
+    if len(_norm(q)) < 3:
+        return None
+    parts = _query_parts(q)
     clauses = []
     for part in parts:
-        variants = [v for v in fts_variants(part) if len(v) >= 3]
-        if not variants:
+        clause = _trigram_clause(part)
+        if clause is None:
             return None
-        clauses.append(" OR ".join(_fts_phrase(v) for v in variants))
+        clauses.append(clause)
     if len(clauses) == 1:
         return clauses[0]
-    return " AND ".join(f"({clause})" for clause in clauses)
+    return " AND ".join(clauses)
+
+
+def _post_filter(q: str) -> tuple[str, list[str]]:
+    """Exact-substring filter for the detail=none FTS (returns SQL + params).
+
+    The trigram AND above matches docs whose trigrams merely co-occur; this
+    restores contiguous-substring and quoted-phrase semantics over
+    search_name/storage/slug.
+    """
+    parts = _query_parts(q)
+    conds: list[str] = []
+    params: list[str] = []
+    for part in parts:
+        variants = [v for v in fts_variants(part) if v]
+        variant_conds: list[str] = []
+        for v in variants:
+            pat = "%" + _like_escape(v) + "%"
+            variant_conds.append(
+                "(f.search_name LIKE ? ESCAPE '\\' OR f.storage LIKE ? ESCAPE '\\' "
+                "OR f.slug LIKE ? ESCAPE '\\')"
+            )
+            params.extend([pat, pat, pat])
+        conds.append("(" + " OR ".join(variant_conds) + ")")
+    return (" AND " + " AND ".join(conds)) if conds else "", params
 
 
 def _cursor_context(q: str, media: str | None, extension: str | None,
@@ -166,7 +208,8 @@ def _capped_total(con: sqlite3.Connection, inner_sql: str, params: list,
 
 _FILES_COLUMNS = """
 f.id, f.album_id, f.file_id, f.search_name, f.storage, f.slug,
-f.mime, f.media, f.extension, f.size, f.uploaded_at, a.title AS album_title
+f.mime, f.media, f.extension, f.size, f.uploaded_at, a.title AS album_title,
+a.thumb AS album_thumb
 """
 
 _NEWEST_ORDER = "f.uploaded_at DESC NULLS LAST, f.id DESC"
@@ -295,6 +338,7 @@ def search_files(
     context = _cursor_context(q, media, extension, sort, mode)
     cursor_key = _decode_cursor(cursor, context)
     page_offset = 0 if cursor_key is not None else max(0, offset)
+    post_where, post_params = _post_filter(q) if match_clause else ("", [])
 
     if mode == "list":
         total, truncated = _capped_total(
@@ -330,30 +374,27 @@ def search_files(
             order,
         )
     else:
-        inner = "SELECT files_fts.rowid FROM files_fts WHERE files_fts MATCH ?"
-        total_params: list[Any] = [match_clause]
-        if filter_where:
-            inner = (
-                f"SELECT x.rowid FROM ({inner}) x "
-                f"JOIN files f ON f.id = x.rowid WHERE 1=1 {filter_where}"
-            )
-            total_params += filter_params
-        total, truncated = _capped_total(con, inner, total_params)
+        inner = (
+            "SELECT files_fts.rowid FROM files_fts "
+            "JOIN files f ON f.id = files_fts.rowid "
+            f"WHERE files_fts MATCH ? {filter_where} {post_where}"
+        )
+        total, truncated = _capped_total(
+            con, inner, [match_clause] + filter_params + post_params
+        )
 
         if kind == "relevance":
             cursor_where, cursor_params = (
                 _cursor_predicate(kind, cursor_key) if cursor_key else ("", [])
             )
-            source = "FROM files_fts"
-            if filter_where:
-                source += " JOIN files f ON f.id = files_fts.rowid"
             rows = _results(
                 con,
                 f"""
                 WITH scored AS (
-                    SELECT files_fts.rowid AS rowid, bm25(files_fts) AS score
-                    {source}
-                    WHERE files_fts MATCH ? {filter_where}
+                    SELECT f.id AS rowid, LENGTH(f.search_name) AS score
+                    FROM files_fts
+                    JOIN files f ON f.id = files_fts.rowid
+                    WHERE files_fts MATCH ? {filter_where} {post_where}
                 ),
                 hits AS (
                     SELECT rowid, score FROM scored
@@ -367,7 +408,8 @@ def search_files(
                 JOIN albums a ON a.bunkr_id = f.album_id
                 ORDER BY hits.score ASC, f.id DESC
                 """,
-                [match_clause] + filter_params + cursor_params + [limit + 1, page_offset],
+                [match_clause] + filter_params + post_params
+                + cursor_params + [limit + 1, page_offset],
             )
         else:
             cursor_where, cursor_params = (
@@ -376,13 +418,14 @@ def search_files(
             hits = (
                 "SELECT f.id AS rowid FROM files_fts "
                 "JOIN files f ON f.id = files_fts.rowid "
-                f"WHERE files_fts MATCH ? {filter_where} {cursor_where} "
+                f"WHERE files_fts MATCH ? {filter_where} {post_where} {cursor_where} "
                 f"ORDER BY {order} LIMIT ? OFFSET ?"
             )
             rows = _file_rows_from_hits(
                 con,
                 hits,
-                [match_clause] + filter_params + cursor_params + [limit + 1, page_offset],
+                [match_clause] + filter_params + post_params
+                + cursor_params + [limit + 1, page_offset],
                 order,
             )
 
