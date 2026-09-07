@@ -130,23 +130,33 @@ def _upgrade_files_extension(con: sqlite3.Connection) -> None:
     columns = {row["name"] for row in con.execute("PRAGMA table_info(files)")}
     if "extension" not in columns:
         con.execute("ALTER TABLE files ADD COLUMN extension TEXT NOT NULL DEFAULT ''")
-    if _meta_get(con, "files_extension_backfilled") != "1":
-        with con:
-            # Drop files_au so backfilling 26M rows does not re-tokenize each
-            # one into files_fts; _upgrade_files_fts restores the trigger.
-            con.execute("DROP TRIGGER IF EXISTS files_au")
-            con.create_function("file_extension", 1, _file_extension)
-            con.execute(
-                "UPDATE files SET extension = file_extension(search_name) "
-                "WHERE extension = ''"
-            )
-            _meta_set(con, "files_extension_backfilled", "1")
     con.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_files_extension_uploaded_id
         ON files(extension, uploaded_at DESC, id DESC)
         """
     )
+    if _meta_get(con, "files_extension_backfilled") != "1":
+        # Drop files_au so backfilling does not re-tokenize every row into
+        # files_fts; _upgrade_files_fts restores the trigger afterwards.
+        con.execute("DROP TRIGGER IF EXISTS files_au")
+        con.create_function("file_extension", 1, _file_extension)
+        # Commit in chunks so the WAL never grows to the size of the whole
+        # files table (a single 26M-row UPDATE has exceeded the disk before).
+        # Filter on `file_extension(search_name) <> ''` so rows that legitimately
+        # have no extension never re-match and the loop always terminates.
+        while True:
+            cur = con.execute(
+                "UPDATE files SET extension = file_extension(search_name) "
+                "WHERE id IN ("
+                "SELECT id FROM files WHERE extension = '' "
+                "AND file_extension(search_name) <> '' LIMIT 200000)"
+            )
+            con.commit()
+            if cur.rowcount == 0:
+                break
+        _meta_set(con, "files_extension_backfilled", "1")
+        con.commit()
 
 
 def init_db(con: sqlite3.Connection) -> None:
